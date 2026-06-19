@@ -1,0 +1,91 @@
+--- a/HyperAlloc/src/main/java/com/amazon/corretto/benchmark/hyperalloc/AllocObject.java	2026-06-19 03:23:45
++++ b/HyperAlloc/src/main/java/com/amazon/corretto/benchmark/hyperalloc/AllocObject.java	2026-06-19 03:26:31
+@@ -2,9 +2,6 @@
+ // SPDX-License-Identifier: Apache-2.0
+ package com.amazon.corretto.benchmark.hyperalloc;
+ 
+-import org.openjdk.jol.info.ClassLayout;
+-import org.openjdk.jol.info.GraphLayout;
+-
+ import java.util.concurrent.ThreadLocalRandom;
+ import java.util.concurrent.atomic.LongAdder;
+ 
+@@ -112,9 +109,36 @@
+      * The enumeration to AllocObject overhead in heap.
+      */
+     static class ObjectOverhead {
+-        private final int overhead = (int) GraphLayout.parseInstance(new AllocObject(0)).totalSize();
++        // art-on-server: measure the per-object heap overhead (an AllocObject plus its empty byte[])
++        // PORTABLY -- by allocating many and reading the managed-heap delta -- instead of JOL's
++        // GraphLayout, which requires sun.misc.Unsafe and a HotSpot/OpenJDK java.vm.name and throws
++        // on ART ("Dalvik"). This runs once at startup, never in the allocation hot path, and is
++        // accurate for whichever runtime (HotSpot or ART) actually executes it, so each side sizes
++        // objects to fill the same real heap bytes.
++        private final int overhead = measure();
+         int getOverhead() {
+             return overhead;
+         }
++
++        private static int measure() {
++            final int n = 200_000;
++            final Runtime rt = Runtime.getRuntime();
++            final AllocObject[] keep = new AllocObject[n];
++            rt.gc();
++            final long before = rt.totalMemory() - rt.freeMemory();
++            for (int i = 0; i < n; i++) {
++                keep[i] = new AllocObject(0);
++            }
++            final long after = rt.totalMemory() - rt.freeMemory();
++            // Keep `keep` reachable across the second reading so the objects are not collected.
++            if (keep[n - 1] == null) {
++                throw new AssertionError();
++            }
++            long perObject = (after - before) / n;
++            if (perObject < 16) {
++                perObject = 16;
++            }
++            return (int) ((perObject + 7L) & ~7L);  // round up to 8-byte object alignment
++        }
+     }
+ }
+--- a/HyperAlloc/src/main/java/com/amazon/corretto/benchmark/hyperalloc/SimpleRunConfig.java	2026-06-19 03:23:45
++++ b/HyperAlloc/src/main/java/com/amazon/corretto/benchmark/hyperalloc/SimpleRunConfig.java	2026-06-19 03:26:59
+@@ -2,10 +2,6 @@
+ // SPDX-License-Identifier: Apache-2.0
+ package com.amazon.corretto.benchmark.hyperalloc;
+ 
+-import com.sun.management.HotSpotDiagnosticMXBean;
+-
+-import java.lang.management.ManagementFactory;
+-
+ /**
+  * Class for parsing simple run parameters.
+  */
+@@ -17,20 +13,20 @@
+     private int numOfThreads = 4;
+     private int minObjectSize = 128;
+     private int maxObjectSize = 1024;
+-    private final boolean useCompressedOops;
++    // art-on-server: reported only (cosmetic). ART uses native 8-byte references (no compressed
++    // oops); the actual oops mode on OpenJDK runs is set by the -XX:+/-UseCompressedOops launch flag,
++    // not read here. We drop the HotSpot-only HotSpotDiagnosticMXBean lookup (absent on ART).
++    private final boolean useCompressedOops = false;
+     private int pruneRatio = ObjectStore.DEFAULT_PRUNE_RATIO;
+     private int reshuffleRatio = ObjectStore.DEFAULT_RESHUFFLE_RATIO;
+-    private final int heapSizeInMb = (int) (ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getMax() / 1048576L);
++    // art-on-server: use Runtime.maxMemory() (portable) instead of the java.lang.management
++    // MemoryMXBean, which ART omits.
++    private final int heapSizeInMb = (int) (Runtime.getRuntime().maxMemory() / 1048576L);
+     private String logFile = "output.csv";
+     private String allocationLogFile = null;
+     private Double allocationSmoothnessFactor = null;
+     private double rampUpSeconds = 0.0;
+ 
+-    {
+-        HotSpotDiagnosticMXBean mxBeanServer = ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class);
+-        useCompressedOops = Boolean.parseBoolean(mxBeanServer.getVMOption("UseCompressedOops").getValue());
+-    }
+-
+     /**
+      * Parse input arguments from a string array.
+      *

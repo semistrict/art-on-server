@@ -1689,7 +1689,7 @@ index b1b39a9cca..d18b77c0c7 100644
 +    static_libs: ["libbase"],
 +}
 diff --git a/runtime/arch/arm64/quick_entrypoints_arm64.S b/runtime/arch/arm64/quick_entrypoints_arm64.S
-index 98b7e969fc..a6525dec0b 100644
+index 98b7e969fc..18e0386610 100644
 --- a/runtime/arch/arm64/quick_entrypoints_arm64.S
 +++ b/runtime/arch/arm64/quick_entrypoints_arm64.S
 @@ -424,8 +424,15 @@ SAVE_SIZE=8*8   // x4, x5, <padding>, x19, x20, x21, FP, LR saved.
@@ -1785,7 +1785,34 @@ index 98b7e969fc..a6525dec0b 100644
      ldr x3, [xSELF, #THREAD_CARD_TABLE_OFFSET]
      lsr x0, x0, #CARD_TABLE_CARD_SHIFT
      strb w3, [x3, x0]
-@@ -1315,7 +1332,8 @@ ENTRY \c_name
+@@ -1192,7 +1209,11 @@ ENTRY \name
+     SETUP_SAVE_EVERYTHING_FRAME \runtime_method_offset       // save everything for stack crawl
+     mov   x1, xSELF                   // pass Thread::Current
+     CALL_SYMBOL \entrypoint           // (int32_t index, Thread* self)
+-    cbz   w0, 1f                      // If result is null, deliver the OOME.
++    // art-host fork (large heap): the result is a native pointer-width (8-byte) reference (a
++    // resolved Class/String/MethodType/MethodHandle). Test the full 64-bit register for null --
++    // a `cbz w0` would treat a non-null reference whose low 32 bits are zero (a >4 GiB object) as
++    // null and deliver a non-existent OOME, aborting in QuickDeliverException (exception != null).
++    cbz   x0, 1f                      // If result is null, deliver the OOME.
+     DEOPT_OR_RESTORE_SAVE_EVERYTHING_FRAME_AND_RETURN_X0 x1, /* is_ref= */ 1
+ 1:
+     DELIVER_PENDING_EXCEPTION_FRAME_READY
+@@ -1206,7 +1227,12 @@ END \name
+ 
+ .macro RETURN_OR_DEOPT_IF_RESULT_IS_NON_NULL_OR_DELIVER
+     CFI_REMEMBER_STATE
+-    cbz w0, 1f                       // result zero branch over
++    // art-host fork (large heap): the result is a native pointer-width (8-byte) object reference
++    // (object/array allocation, StringBuilder.append). Test the full 64-bit register for null -- a
++    // `cbz w0` would treat a non-null reference whose low 32 bits are zero (a successfully
++    // allocated object above 4 GiB) as null and deliver a non-existent exception, aborting in
++    // QuickDeliverException (CHECK(exception != nullptr)).
++    cbz x0, 1f                       // result zero branch over
+     DEOPT_OR_RETURN x1, /*is_ref=*/1 // check for deopt or return
+ 1:
+     CFI_RESTORE_STATE_AND_DEF_CFA sp, 0
+@@ -1315,7 +1341,8 @@ ENTRY \c_name
  #error "Class pointer needs to overwrite next pointer."
  #endif
      POISON_HEAP_REF w0
@@ -1795,7 +1822,7 @@ index 98b7e969fc..a6525dec0b 100644
                                                                // Push the new object onto the thread
                                                                // local allocation stack and
                                                                // increment the thread local
-@@ -1391,7 +1409,9 @@ ART_QUICK_ALLOC_OBJECT_ROSALLOC art_quick_alloc_object_initialized_rosalloc, \
+@@ -1391,7 +1418,9 @@ ART_QUICK_ALLOC_OBJECT_ROSALLOC art_quick_alloc_object_initialized_rosalloc, \
      bhi    \slowPathLabel
      str    x6, [xSELF, #THREAD_LOCAL_POS_OFFSET]              // Store new thread_local_pos.
      POISON_HEAP_REF w0
@@ -1806,7 +1833,7 @@ index 98b7e969fc..a6525dec0b 100644
      mov    x0, x4
      // No barrier. The class is already observably initialized (otherwise the fast
      // path size check above would fail) and new-instance allocations are protected
-@@ -1463,7 +1483,8 @@ GENERATE_ALLOC_OBJECT_RESOLVED_TLAB \
+@@ -1463,7 +1492,8 @@ GENERATE_ALLOC_OBJECT_RESOLVED_TLAB \
      add    \xTemp0, \xTemp0, \xTemp1
      str    \xTemp0, [xSELF, #THREAD_LOCAL_POS_OFFSET]         // Store new thread_local_pos.
      POISON_HEAP_REF \wClass
@@ -1816,7 +1843,7 @@ index 98b7e969fc..a6525dec0b 100644
      str    \wCount, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]         // Store the array length.
  // new-array is special. The class is loaded and immediately goes to the Initialized state
  // before it is published. Therefore the only fence needed is for the publication of the object.
-@@ -1511,15 +1532,18 @@ END \name
+@@ -1511,15 +1541,18 @@ END \name
      lsl    \xTemp1, \xCount, \xTemp0                          // Calculate data size
      // Add array data offset and alignment.
      add    \xTemp1, \xTemp1, #(MIRROR_INT_ARRAY_DATA_OFFSET + OBJECT_ALIGNMENT_MASK)
@@ -1839,7 +1866,7 @@ index 98b7e969fc..a6525dec0b 100644
  .endm
  
  .macro COMPUTE_ARRAY_SIZE_8 \
-@@ -2484,53 +2508,57 @@ ENTRY art_quick_update_inline_cache
+@@ -2484,53 +2517,57 @@ ENTRY art_quick_update_inline_cache
      // Don't update the cache if we are marking.
      cbnz wMR, .Ldone
  #endif
@@ -3505,6 +3532,83 @@ index efd52918af..59c915a13a 100644
    if (UNLIKELY(soa.Self()->IsExceptionPending())) {
      return nullptr;
    }
+diff --git a/runtime/quick_exception_handler.cc b/runtime/quick_exception_handler.cc
+index 8180d0a5b3..63590fa446 100644
+--- a/runtime/quick_exception_handler.cc
++++ b/runtime/quick_exception_handler.cc
+@@ -617,15 +617,27 @@ class DeoptimizeStackVisitor final : public StackVisitor {
+       static constexpr uint32_t kDeadValue = 0xEBADDE09;
+       uint32_t value = kDeadValue;
+       bool is_reference = false;
++      // art-host fork (large heap): an object reference is a native pointer-width (8-byte) value,
++      // so it may have non-zero high bits when the heap maps above 4 GiB. When this vreg holds a
++      // reference, read it at full width into `ref` (a 4-byte `value` would truncate it and feed a
++      // bad pointer to SetVRegReference, crashing the deopt itself or the next GC root walk). The
++      // primitive path keeps the 4-byte `value`. This mirrors the GC root walk in
++      // Thread::ReferenceMapVisitor (thread.cc), which reads stack-mask references as 8-byte
++      // StackReferences at byte offset bit*kVRegSize and register references via GetGPRAddress.
++      mirror::Object* ref = nullptr;
+ 
+       switch (location) {
+         case DexRegisterLocation::Kind::kInStack: {
+           const int32_t offset = vreg_map[vreg].GetStackOffsetInBytes();
+           const uint8_t* addr = reinterpret_cast<const uint8_t*>(GetCurrentQuickFrame()) + offset;
+-          value = *reinterpret_cast<const uint32_t*>(addr);
++          // The stack mask marks a reference at bit offset/kVRegSize (it indexes 4-byte slots), but
++          // the reference stored there is a full 8-byte StackReference.
+           uint32_t bit = (offset >> 2);
+           if (bit < stack_mask.size_in_bits() && stack_mask.LoadBit(bit)) {
+             is_reference = true;
++            ref = reinterpret_cast<const StackReference<mirror::Object>*>(addr)->AsMirrorPtr();
++          } else {
++            value = *reinterpret_cast<const uint32_t*>(addr);
+           }
+           break;
+         }
+@@ -634,20 +646,27 @@ class DeoptimizeStackVisitor final : public StackVisitor {
+         case DexRegisterLocation::Kind::kInFpuRegister:
+         case DexRegisterLocation::Kind::kInFpuRegisterHigh: {
+           uint32_t reg = vreg_map[vreg].GetMachineRegister();
+-          bool result = GetRegisterIfAccessible(reg, location, &value);
+-          CHECK(result);
+-          if (location == DexRegisterLocation::Kind::kInRegister) {
+-            if (((1u << reg) & register_mask) != 0) {
+-              is_reference = true;
+-            }
++          if (location == DexRegisterLocation::Kind::kInRegister &&
++              (((1u << reg) & register_mask) != 0)) {
++            is_reference = true;
++            // Read the GP register at full pointer width. GetRegisterIfAccessible truncates to the
++            // low 32 bits on 64-bit targets (its out-param is uint32_t), which would lose the high
++            // bits of a >4 GiB reference; GetGPRAddress gives the full 8-byte register slot.
++            uintptr_t* reg_addr = GetGPRAddress(reg);
++            CHECK(reg_addr != nullptr);
++            ref = *reinterpret_cast<mirror::Object**>(reg_addr);
++          } else {
++            bool result = GetRegisterIfAccessible(reg, location, &value);
++            CHECK(result);
+           }
+           break;
+         }
+         case DexRegisterLocation::Kind::kConstant: {
+           value = vreg_map[vreg].GetConstant();
+           if (value == 0) {
+-            // Make it a reference for extra safety.
++            // Make it a reference for extra safety. A constant reference can only be null.
+             is_reference = true;
++            ref = nullptr;
+           }
+           break;
+         }
+@@ -660,7 +679,7 @@ class DeoptimizeStackVisitor final : public StackVisitor {
+         }
+       }
+       if (is_reference) {
+-        new_frame->SetVRegReference(vreg, reinterpret_cast<mirror::Object*>(value));
++        new_frame->SetVRegReference(vreg, ref);
+       } else {
+         new_frame->SetVReg(vreg, value);
+       }
 diff --git a/runtime/reflection.cc b/runtime/reflection.cc
 index c6dcf59ca1..8ac5131e21 100644
 --- a/runtime/reflection.cc

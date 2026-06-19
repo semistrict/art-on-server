@@ -53,7 +53,12 @@ $(foreach f,$(test_suite_readme),$(if $(strip $(ALL_TARGETS.$(f).META_LIC)),,$(e
 test_tools += $(test_suite_tools)
 
 # The JDK to package into the test suite zip file.  Always package the linux JDK.
-test_suite_jdk_dir := $(ANDROID_JAVA_HOME)/../linux-x86
+# On non-x86 build hosts the linux-x86 JDK prebuilt may be absent; fall back
+# to the host's own JDK so suite packaging still works.
+test_suite_jdk_dir := $(wildcard $(ANDROID_JAVA_HOME)/../linux-x86)
+ifeq ($(test_suite_jdk_dir),)
+  test_suite_jdk_dir := $(ANDROID_JAVA_HOME)
+endif
 ifndef test_suite_jdk_files
   # This file gets included many times, so make sure we only run the $(shell) once.
   # Otherwise it will slow down every build due to all copies of it being rerun when kati

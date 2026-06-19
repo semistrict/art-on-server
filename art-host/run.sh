@@ -30,5 +30,6 @@ run_in_vm test/79-jit-correctness.sh
 run_in_vm test/80-jit-ref.sh
 run_in_vm test/81-jit-largeheap.sh
 run_in_vm test/82-jit-intrinsics.sh
+run_in_vm test/83-jit-gcroots.sh
 
 echo "art-host run: OK"

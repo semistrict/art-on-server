@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# art kotlinc [-d OUT.dex.jar] [-cp DEPS] <.kt sources...>
+# Runs the Kotlin compiler ON ART (transparently dexed, cached) to produce
+# .class, then d8 (on ART) to dex. No JDK required. The Kotlin compiler and
+# stdlib are fetched into the cache on first use. Invoked via the `art` driver.
+set -euo pipefail
+
+: "${ART_SDK_ROOT:?run via the art driver}"
+ART="$ART_SDK_ROOT/bin/art"
+CACHE="${ARTSDK_CACHE:-$HOME/.cache/artsdk}"
+KROOT="$CACHE/kotlin"
+KVER="${ARTSDK_KOTLIN_VERSION:-2.1.20}"
+
+OUT="app.dex.jar"
+DEPS=""
+SRCS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d|--output) OUT="$2"; shift 2 ;;
+    -cp|-classpath|--class-path) DEPS="$2"; shift 2 ;;
+    *) SRCS+=("$1"); shift ;;
+  esac
+done
+[ ${#SRCS[@]} -gt 0 ] || { echo "art kotlinc: no .kt sources given" >&2; exit 2; }
+
+# Fetch the Kotlin compiler distribution on first use.
+if [ ! -d "$KROOT/kotlinc/lib" ]; then
+  echo "fetching Kotlin compiler $KVER (one time)..." >&2
+  mkdir -p "$KROOT"
+  curl -fsSL -o "$KROOT/kotlinc.zip" \
+    "https://github.com/JetBrains/kotlin/releases/download/v$KVER/kotlin-compiler-$KVER.zip"
+  ( cd "$KROOT" && unzip -q kotlinc.zip && rm kotlinc.zip )
+fi
+KLIB="$KROOT/kotlinc/lib"
+STDLIB="$KLIB/kotlin-stdlib.jar"
+
+# Compiler classpath = all the Kotlin compiler jars; `art run` dexes them once
+# and caches the result, so subsequent invocations are fast.
+KCP=""
+for j in "$KLIB"/*.jar; do KCP="$KCP${KCP:+:}$j"; done
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/art-kotlinc.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+echo "compiling ${#SRCS[@]} .kt input(s) with kotlinc on ART..." >&2
+"$ART" run -Xmx2g -cp "$KCP" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
+  -no-stdlib -cp "$STDLIB${DEPS:+:$DEPS}" \
+  -d "$WORK/classes.jar" "${SRCS[@]}"
+
+echo "dexing with d8 on ART..." >&2
+DEXLIBS=(--lib "$STDLIB")
+IFS=: read -ra DARR <<< "$DEPS"
+for d in "${DARR[@]}"; do [ -n "$d" ] && DEXLIBS+=(--lib "$d"); done
+"$ART" d8 --release --min-api 34 "${DEXLIBS[@]}" --output "$OUT" "$WORK/classes.jar"
+echo "wrote $OUT (run with: art run -cp $OUT:$STDLIB${DEPS:+:$DEPS} <MainKt>)"

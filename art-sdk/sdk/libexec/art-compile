@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# art compile [-d OUT.dex.jar] [-cp DEPS] <src-dir-or-file...>
+# ECJ (on the runtime) compiles .java against the SDK's OSS core stubs (plus
+# any -cp dependency jars), then d8 (on the runtime) dexes the result. The
+# output dex jar bundles the app classes only; run it with the same -cp deps
+# (which `art run` transparently dexes). Invoked via the `art` driver, which
+# has already exported ART_SDK_ROOT and the runtime environment.
+set -euo pipefail
+
+: "${ART_SDK_ROOT:?run via the art driver}"
+ART="$ART_SDK_ROOT/bin/art"
+LIB="$ART_SDK_ROOT/lib"
+
+OUT="app.dex.jar"
+DEPS=""
+SRCS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d|--output) OUT="$2"; shift 2 ;;
+    -cp|-classpath|--class-path) DEPS="$2"; shift 2 ;;
+    *) SRCS+=("$1"); shift ;;
+  esac
+done
+[ ${#SRCS[@]} -gt 0 ] || { echo "art compile: no sources given" >&2; exit 2; }
+
+# OSS compile-time class stubs (AOSP libcore .class jars, pre-dex).
+BOOTCP=""
+for j in "$LIB"/compile/*.jar; do
+  BOOTCP="$BOOTCP${BOOTCP:+:}$j"
+done
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/art-compile.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/classes"
+
+echo "compiling ${#SRCS[@]} input(s) with ECJ on ART..."
+"$ART" dalvikvm -Xmx1g -cp "$LIB/tools/ecj.dex.jar" \
+  org.eclipse.jdt.internal.compiler.batch.Main \
+  -source 1.8 -target 1.8 -encoding UTF-8 -proc:none -nowarn \
+  -bootclasspath "$BOOTCP" \
+  ${DEPS:+-classpath "$DEPS"} \
+  -d "$WORK/classes" \
+  "${SRCS[@]}"
+
+(cd "$WORK/classes" && zip -q -r "$WORK/classes.jar" .)
+
+echo "dexing with d8 on ART..."
+DEXLIBS=()
+IFS=: read -ra DARR <<< "$DEPS"
+for d in "${DARR[@]}"; do [ -n "$d" ] && DEXLIBS+=(--lib "$d"); done
+"$ART" d8 --release --min-api 34 "${DEXLIBS[@]}" --output "$OUT" "$WORK/classes.jar"
+echo "wrote $OUT"

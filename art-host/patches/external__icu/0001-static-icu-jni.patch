@@ -1,0 +1,93 @@
+From: art-host fork <ramon@echophase.com>
+Subject: [PATCH] libicu_jni_static for static dalvikvm
+
+- libcore_bridge native Android.bp: static variant (+ platform jni headers)
+- Register.cpp: per-library JNI_OnLoad_icu_jni entry point
+- libicu/src: libicu_static visibility for libcore + art/dalvikvm
+---
+diff --git a/android_icu4j/libcore_bridge/src/native/Android.bp b/android_icu4j/libcore_bridge/src/native/Android.bp
+index dfc41b9ff..4c1680248 100644
+--- a/android_icu4j/libcore_bridge/src/native/Android.bp
++++ b/android_icu4j/libcore_bridge/src/native/Android.bp
+@@ -65,3 +65,35 @@ cc_library_shared {
+         "com.android.i18n",
+     ],
+ }
++
++// art-host fork: static variant for the fully static host dalvikvm
++// (dalvikvms). JNI_OnLoad is reached via the JNI_OnLoad_icu_jni alias in
++// Register.cpp.
++cc_library_static {
++    name: "libicu_jni_static",
++    visibility: ["//art/dalvikvm"],
++    device_supported: false,
++    host_supported: true,
++    header_libs: [
++        "jni_headers",
++        "jni_platform_headers",
++        "libnativehelper_header_only",
++    ],
++    static_libs: [
++        "libbase",
++        "libicuuc",
++        "libicui18n",
++        "liblog",
++        "libnativehelper_static_noinvocation",
++        "libcutils",
++    ],
++    srcs: [
++        "*.cpp",
++    ],
++    cflags: [
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++    ],
++    cppflags: ["-DU_USING_ICU_NAMESPACE=0"],
++}
+diff --git a/android_icu4j/libcore_bridge/src/native/Register.cpp b/android_icu4j/libcore_bridge/src/native/Register.cpp
+index 0a4bc4c2a..90b1638f8 100644
+--- a/android_icu4j/libcore_bridge/src/native/Register.cpp
++++ b/android_icu4j/libcore_bridge/src/native/Register.cpp
+@@ -25,7 +25,10 @@
+ #include "JniConstants.h"
+ 
+ // ART calls this on startup, so we can statically register all our native methods.
+-jint JNI_OnLoad(JavaVM* vm, void*) {
++// art-host fork: real implementation under a per-library name; see
++// libcore/luni Register.cpp for rationale. NOT extern "C": the REGISTER
++// macro declares register_* inside the body with C++ linkage.
++static jint JNI_OnLoad_icu_jni_impl(JavaVM* vm, void*) {
+     ALOGV("libicu_jni JNI_OnLoad");
+     JNIEnv* env;
+     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+@@ -75,3 +78,11 @@ void JNI_OnUnload(JavaVM*, void*) {
+     // De-init ICU. Do the opposite of the above u_init() function.
+     u_cleanup();
+ }
++
++extern "C" jint JNI_OnLoad_icu_jni(JavaVM* vm, void* reserved) {
++    return JNI_OnLoad_icu_jni_impl(vm, reserved);
++}
++
++extern "C" jint JNI_OnLoad(JavaVM* vm, void* reserved) {
++    return JNI_OnLoad_icu_jni(vm, reserved);
++}
+diff --git a/libicu/src/Android.bp b/libicu/src/Android.bp
+index 227752f2e..3630731c8 100644
+--- a/libicu/src/Android.bp
++++ b/libicu/src/Android.bp
+@@ -25,6 +25,13 @@ package {
+ cc_library_static {
+     name: "libicu_static",
+     defaults: ["icu4c_defaults"],
++    // art-host fork: linked into libcore's static boot JNI libs for the
++    // fully static host dalvikvm (dalvikvms).
++    visibility: [
++        "//art/dalvikvm",
++        "//external/icu:__subpackages__",
++        "//libcore",
++    ],
+     host_supported: true,
+     native_bridge_supported: true,
+     srcs: [

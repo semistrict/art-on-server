@@ -1,0 +1,191 @@
+From: art-host fork <ramon@echophase.com>
+Subject: [PATCH] libcore for arm64-musl host + static dalvikvm
+
+- OsConstants.cpp: musl MADV_*/_SC_2_C_VERSION fixes
+- NativeCode.bp: libandroidio_static/libjavacore_static/libopenjdk_static
+- Register.cpp/OnLoad.cpp: per-library JNI_OnLoad_* entry points for the
+  static registry (colliding JNI_OnLoad symbols all bind to the first
+  definition in a static link)
+---
+diff --git a/NativeCode.bp b/NativeCode.bp
+index 08e98a4fe25..b0c34e8e3cf 100644
+--- a/NativeCode.bp
++++ b/NativeCode.bp
+@@ -108,6 +108,95 @@ cc_library_shared {
+     },
+ }
+ 
++// art-host fork: static variants of the boot JNI libraries for the fully
++// static host dalvikvm (dalvikvms). Dependencies are re-expressed as
++// static libs; JNI_OnLoad is reached via the per-library alias exported
++// from Register.cpp / OnLoad.cpp.
++cc_library_static {
++    name: "libandroidio_static",
++    visibility: [
++        "//art/dalvikvm",
++        "//external/conscrypt",
++    ],
++    defaults: ["core_native_default_flags"],
++    device_supported: false,
++    host_supported: true,
++    srcs: [":libandroidio_srcs"],
++    static_libs: ["liblog"],
++}
++
++cc_library_static {
++    name: "libjavacore_static",
++    visibility: ["//art/dalvikvm"],
++    defaults: ["core_native_default_flags"],
++    device_supported: false,
++    host_supported: true,
++    srcs: [":luni_native_srcs"],
++    header_libs: ["jni_headers"],
++    static_libs: [
++        "libandroidio_static",
++        "libbase",
++        "libcrypto_static", // Not FIPS tested - for bignums only.
++        "libexpat",
++        "libicu_static",
++        "libicui18n",
++        "libicuuc",
++        "liblog",
++        "libnativehelper_static_noinvocation",
++        "libz",
++        "libziparchive",
++    ],
++}
++
++cc_library_static {
++    name: "libopenjdk_static",
++    visibility: ["//art/dalvikvm"],
++    defaults: ["core_native_default_flags"],
++    device_supported: false,
++    host_supported: true,
++    srcs: [":libopenjdk_native_srcs"],
++    local_include_dirs: [
++        "luni/src/main/native",
++    ],
++    header_libs: ["jni_headers"],
++    cflags: [
++        "-Wno-unused-parameter",
++        "-Wno-unused-variable",
++        "-Wno-parentheses-equality",
++        "-Wno-constant-logical-operand",
++        "-Wno-sometimes-uninitialized",
++    ],
++    static_libs: [
++        "libandroidio_static",
++        "libbase",
++        "libcrypto_static", // Not FIPS tested - for bignums only.
++        "libfdlibm",
++        "libicu_static",
++        "libicui18n",
++        "libicuuc",
++        "liblog",
++        "libnativehelper_static_noinvocation",
++        "libz",
++    ],
++    target: {
++        musl: {
++            cflags: [
++                "-D_LARGEFILE64_SOURCE",
++                "-D_GNU_SOURCE",
++                "-DLINUX",
++            ],
++        },
++        glibc: {
++            cflags: [
++                "-D__GLIBC__",
++                "-D_LARGEFILE64_SOURCE",
++                "-D_GNU_SOURCE",
++                "-DLINUX",
++            ],
++        },
++    },
++}
++
+ cc_defaults {
+     name: "libopenjdk_native_defaults",
+     defaults: [
+diff --git a/luni/src/main/native/Register.cpp b/luni/src/main/native/Register.cpp
+index 91cabf79f20..1c970e4a069 100644
+--- a/luni/src/main/native/Register.cpp
++++ b/luni/src/main/native/Register.cpp
+@@ -25,7 +25,13 @@
+ #include "JniConstants.h"
+ 
+ // DalvikVM calls this on startup, so we can statically register all our native methods.
+-jint JNI_OnLoad(JavaVM* vm, void*) {
++// art-host fork: the real implementation carries a per-library name so the
++// static dalvikvm (dalvikvms) can dispatch it without dlopen (in a static
++// link all references to the colliding JNI_OnLoad symbols bind to the first
++// definition; see art java_vm_ext.cc). NOT extern "C": the REGISTER macro
++// declares the register_* functions inside the body, and they must keep
++// C++ linkage.
++static jint JNI_OnLoad_javacore_impl(JavaVM* vm, void*) {
+     JNIEnv* env;
+     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+         ALOGE("JavaVM::GetEnv() failed");
+@@ -65,3 +71,11 @@ void JNI_OnUnload(JavaVM*, void*) {
+     JniConstants::Invalidate();
+     jniUninitializeConstants();
+ }
++
++extern "C" jint JNI_OnLoad_javacore(JavaVM* vm, void* reserved) {
++    return JNI_OnLoad_javacore_impl(vm, reserved);
++}
++
++extern "C" jint JNI_OnLoad(JavaVM* vm, void* reserved) {
++    return JNI_OnLoad_javacore(vm, reserved);
++}
+diff --git a/luni/src/main/native/android_system_OsConstants.cpp b/luni/src/main/native/android_system_OsConstants.cpp
+index cb3ac21abbd..82c31341a64 100644
+--- a/luni/src/main/native/android_system_OsConstants.cpp
++++ b/luni/src/main/native/android_system_OsConstants.cpp
+@@ -34,6 +34,12 @@
+ #include <sys/capability.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
++#if defined(ANDROID_HOST_MUSL)
++// musl's sys/mman.h lacks newer MADV_* constants (MADV_COLLAPSE,
++// MADV_POPULATE_*); take them from the kernel uapi header. The overlapping
++// macros are identical, so the redefinitions are benign.
++#include <linux/mman.h>
++#endif
+ #include <sys/prctl.h>
+ #include <sys/resource.h>
+ #include <sys/socket.h>
+@@ -544,7 +550,10 @@ static void OsConstants_initConstants(JNIEnv* env, jclass c) {
+     initConstant(env, c, "_SC_2_CHAR_TERM", _SC_2_CHAR_TERM);
+     initConstant(env, c, "_SC_2_C_BIND", _SC_2_C_BIND);
+     initConstant(env, c, "_SC_2_C_DEV", _SC_2_C_DEV);
++#if defined(_SC_2_C_VERSION)
++    // removed in POSIX.1-2001; musl does not define it
+     initConstant(env, c, "_SC_2_C_VERSION", _SC_2_C_VERSION);
++#endif
+     initConstant(env, c, "_SC_2_FORT_DEV", _SC_2_FORT_DEV);
+     initConstant(env, c, "_SC_2_FORT_RUN", _SC_2_FORT_RUN);
+     initConstant(env, c, "_SC_2_LOCALEDEF", _SC_2_LOCALEDEF);
+diff --git a/ojluni/src/main/native/OnLoad.cpp b/ojluni/src/main/native/OnLoad.cpp
+index a1e95fd7b0f..e1bda4ce402 100644
+--- a/ojluni/src/main/native/OnLoad.cpp
++++ b/ojluni/src/main/native/OnLoad.cpp
+@@ -64,7 +64,9 @@ extern "C" void register_java_util_zip_Adler32(JNIEnv* env);
+ extern "C" void register_java_sun_nio_fs_UnixNativeDispatcher(JNIEnv* env);
+ extern "C" void register_java_sun_nio_ch_PollArrayWrapper(JNIEnv* env);
+ 
+-extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
++// art-host fork: real implementation under a per-library name; see
++// libcore/luni Register.cpp for rationale.
++extern "C" JNIEXPORT jint JNI_OnLoad_openjdk(JavaVM* vm, void*) {
+   jint version = JNI_VERSION_1_6;
+   void* raw_env;
+   jint result = vm->GetEnv(&raw_env, version);
+@@ -140,3 +142,7 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
+   env->PopLocalFrame(/* result */ nullptr);  // Pop the local frame.
+   return version;
+ }
++
++extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
++  return JNI_OnLoad_openjdk(vm, reserved);
++}

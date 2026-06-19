@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# art aot <app.dex.jar> [-o OUT_DIR]
+# AOT-compile an app dex into an app image (.art/.oat/.vdex) with dex2oat for
+# instant startup. The image is keyed to this SDK's boot classpath; regenerate
+# on SDK upgrade. Invoked via the `art` driver (env already exported).
+set -euo pipefail
+
+: "${ART_SDK_ROOT:?run via the art driver}"
+BIN="$ART_SDK_ROOT/bin"
+LIB="$ART_SDK_ROOT/lib"
+DEX2OAT="$BIN/dex2oat"
+
+APP=""
+OUTDIR=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output) OUTDIR="$2"; shift 2 ;;
+    *) APP="$1"; shift ;;
+  esac
+done
+[ -n "$APP" ] && [ -f "$APP" ] || { echo "art aot: app dex not found: $APP" >&2; exit 2; }
+APP=$(cd "$(dirname "$APP")" && pwd)/$(basename "$APP")
+: "${OUTDIR:=${APP%.dex.jar}.aot}"
+OUTDIR=${OUTDIR%.jar}
+mkdir -p "$OUTDIR"
+
+BCP="$BOOTCLASSPATH"
+BOOT_IMAGE="$LIB/boot/arm64/boot.art"
+IMG_ARG=()
+[ -f "$BOOT_IMAGE" ] && IMG_ARG=(--boot-image="$BOOT_IMAGE")
+
+"$DEX2OAT" \
+  --runtime-arg -Xms64m --runtime-arg -Xmx512m \
+  --runtime-arg -Xbootclasspath:"$BCP" \
+  --runtime-arg -Xbootclasspath-locations:"$BCP" \
+  "${IMG_ARG[@]}" \
+  --dex-file="$APP" --dex-location="$APP" \
+  --instruction-set=arm64 \
+  --compiler-filter=speed \
+  --oat-file="$OUTDIR/app.odex" \
+  --app-image-file="$OUTDIR/app.art"
+echo "wrote $OUTDIR/{app.odex,app.art}"

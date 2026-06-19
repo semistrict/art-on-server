@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# ART SDK driver. Env-free: every path is derived from this script's own
+# location, so the SDK is fully relocatable — unpack anywhere and run.
+#
+#   art run    -cp app.dex Main [args...]   run a dex/jar on the runtime
+#   art compile [-d out] <srcs...>          ECJ + d8  (.java -> .dex jar)
+#   art d8     [d8 args...]                 raw d8 (dex compiler)
+#   art aot    <app.dex>                    AOT-compile an app image
+#   art selftest                            run the SDK acceptance suite
+#   art dalvikvm [vm args...]               raw runtime invocation
+#   art version
+set -euo pipefail
+
+# --- locate the SDK root (resolve symlinks) -------------------------------
+src="${BASH_SOURCE[0]}"
+while [ -h "$src" ]; do
+  dir=$(cd -P "$(dirname "$src")" && pwd)
+  src=$(readlink "$src")
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+BIN_DIR=$(cd -P "$(dirname "$src")" && pwd)
+SDK_ROOT=$(dirname "$BIN_DIR")
+export ART_SDK_ROOT="$SDK_ROOT"
+
+LIB="$SDK_ROOT/lib"
+
+# --- runtime environment (all relative to SDK_ROOT) -----------------------
+# The runtime resolves ICU/tzdata/cacerts through these roots; the layout
+# under lib/ is shaped to match (e.g. ANDROID_I18N_ROOT/etc/icu/...).
+export ANDROID_ART_ROOT="$LIB/android"
+export ANDROID_ROOT="$LIB/android"
+export ANDROID_I18N_ROOT="$LIB/i18n"
+export ANDROID_TZDATA_ROOT="$LIB/tzdata"
+export ANDROID_DATA="${ARTSDK_CACHE:-$HOME/.cache/artsdk/data}"
+mkdir -p "$ANDROID_DATA"
+
+# Boot class path, in dependency order.
+BCP=""
+for j in core-oj core-libart core-icu4j okhttp bouncycastle apache-xml conscrypt; do
+  BCP="$BCP${BCP:+:}$LIB/bootjars/$j-hostdex.jar"
+done
+export BOOTCLASSPATH="$BCP"
+
+DALVIKVM="$BIN_DIR/dalvikvm"
+DEX2OAT="$BIN_DIR/dex2oat"
+
+# The boot image embeds absolute dex paths, so it cannot ship in the (relocatable)
+# tarball — it is generated on demand into a cache dir keyed by the install path,
+# the first time it is needed (or explicitly via `art compile-boot`). Until then,
+# the runtime interprets/JITs the boot classpath (-Xnoimage-dex2oat).
+boot_cache_dir() {
+  local key
+  key=$(printf '%s' "$SDK_ROOT" | cksum | cut -d' ' -f1)
+  echo "${ARTSDK_CACHE:-$HOME/.cache/artsdk}/boot-$key"
+}
+
+boot_image_arg() {
+  local img="$(boot_cache_dir)/arm64/boot.art"
+  if [ -f "$img" ]; then
+    echo "-Ximage:$img"
+  else
+    echo "-Xnoimage-dex2oat"
+  fi
+}
+
+# Runtime defaults. CMC (concurrent mark-compact) is the SDK's headline GC:
+# it compacts concurrently with no read barriers, and — being a compactor
+# rather than a copying collector — it reserves 1x the heap instead of CC's
+# 2x, so the full managed-heap range is usable. LargeObjectSpace=map avoids a
+# large up-front low-memory reservation (the runtime auto-upgrades it to a
+# bounded free-list space when the heap is placed above 4 GiB). Users can
+# override by passing their own -Xgc:/-XX: flags (later args win).
+ART_DEFAULTS=(-Xgc:CMC -XX:LargeObjectSpace=map -Xhidden-api-policy:disabled)
+
+# Execution mode. With native pointer-width (8-byte) object references the heap
+# is no longer capped at 4 GiB, and the optimizing JIT is now reference-correct at
+# EVERY heap size (including well past 4 GiB): the register allocator, spill slots,
+# load/store width, virtual/interface dispatch + IfTable scan, GC stack-root stride,
+# the JIT root tables, the TLAB allocation fast path, the write-barrier card-table index,
+# the hand-written arm64 intrinsics (arraycopy / VarHandle CAS / String.equals / Reference)
+# and the stack-argument calling convention were all made 64-bit-clean (see test/79-82).
+# So the SDK runs JIT by default.
+# Set ARTSDK_INT=1 to force the switch interpreter (a correctness oracle / for debugging).
+if [ -n "${ARTSDK_INT:-}" ]; then
+  ART_DEFAULTS+=(-Xint)
+fi
+
+run_vm() {
+  exec "$DALVIKVM" \
+    -Xbootclasspath:"$BCP" \
+    "$(boot_image_arg)" \
+    "${ART_DEFAULTS[@]}" \
+    "$@"
+}
+
+# Run, transparently dexing any .class entries on -cp/-classpath so standard
+# JVM/Maven jars run unchanged.
+run_app() {
+  local args=() rc
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -cp|-classpath|--class-path)
+        rc=$("$SDK_ROOT/libexec/art-dexcp" "$2")
+        args+=(-cp "$rc"); shift 2 ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  run_vm "${args[@]}"
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  run)
+    run_app "$@"
+    ;;
+  dalvikvm)
+    run_vm "$@"
+    ;;
+  d8)
+    run_vm -cp "$LIB/tools/r8.dex.jar" com.android.tools.r8.D8 "$@"
+    ;;
+  compile)
+    exec "$SDK_ROOT/libexec/art-compile" "$@"
+    ;;
+  kotlinc)
+    exec "$SDK_ROOT/libexec/art-kotlinc" "$@"
+    ;;
+  aot)
+    exec "$SDK_ROOT/libexec/art-aot" "$@"
+    ;;
+  compile-boot)
+    # AOT-compile the boot classpath into a boot image in the cache, keyed to
+    # this install. Gives instant startup on subsequent runs.
+    out="$(boot_cache_dir)"
+    ART_SDK_ROOT="$SDK_ROOT" BOOTCLASSPATH="$BCP" \
+      exec "$SDK_ROOT/libexec/art-compile-boot" "$out"
+    ;;
+  selftest)
+    exec "$SDK_ROOT/tests/selftest" "$@"
+    ;;
+  version|--version|-v)
+    echo "artsdk $(cat "$SDK_ROOT/VERSION") (linux-arm64)"
+    "$DALVIKVM" -showversion -Xbootclasspath:"$BCP" "$(boot_image_arg)" \
+      -version 2>/dev/null | head -1 || true
+    ;;
+  ""|help|-h|--help)
+    sed -n '2,16p' "$src" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "art: unknown command '$cmd' (try 'art help')" >&2
+    exit 2
+    ;;
+esac

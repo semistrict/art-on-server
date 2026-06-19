@@ -1,0 +1,62 @@
+From: art-host fork <ramon@echophase.com>
+Subject: [PATCH] rustprebuilts: support linux-musl-arm64 hosts
+
+Add the aarch64-unknown-linux-musl branch (toolchain provisioned from
+rust dist tarballs at prebuilts/rust/linux-musl-arm64/<version>), and
+tolerate a missing libstd dylib (some dist triples are rlib-only).
+---
+diff --git a/soong/rustprebuilts.go b/soong/rustprebuilts.go
+index 1a0df62..c36b382 100644
+--- a/soong/rustprebuilts.go
++++ b/soong/rustprebuilts.go
+@@ -86,6 +86,7 @@ type props struct {
+ 		Linux_glibc_x86    targetProps
+ 		Linux_musl_x86_64  targetProps
+ 		Linux_musl_x86     targetProps
++		Linux_musl_arm64   targetProps
+ 		Darwin_x86_64      targetProps
+ 	}
+ }
+@@ -109,9 +110,15 @@ func (target *targetProps) addPrebuiltToTarget(ctx android.LoadHookContext, libN
+ 		} else {
+ 			soSuffix = ".so"
+ 		}
+-		dylib, suffix := getPrebuilt(ctx, dir, libName, soSuffix)
+-		target.Dylib.Srcs = []string{dylib}
+-		target.Suffix = proptools.StringPtr(suffix)
++		// art-host fork: upstream rust dist toolchains may ship the std
++		// dylib only for some triples; tolerate a missing dylib instead of
++		// failing the module (rlib linkage still works).
++		globPath := path.Join(ctx.ModuleDir(), dir, libName) + "-*" + soSuffix
++		if len(ctx.Glob(globPath, nil)) == 1 {
++			dylib, suffix := getPrebuilt(ctx, dir, libName, soSuffix)
++			target.Dylib.Srcs = []string{dylib}
++			target.Suffix = proptools.StringPtr(suffix)
++		}
+ 	}
+ }
+ 
+@@ -128,8 +135,12 @@ func constructLibProps(rlib, solib bool) func(ctx android.LoadHookContext) {
+ 			p.Target.Linux_glibc_x86_64.addPrebuiltToTarget(ctx, name, rustDir, "linux-x86", "x86_64-unknown-linux-gnu", rlib, solib)
+ 			p.Target.Linux_glibc_x86.addPrebuiltToTarget(ctx, name, rustDir, "linux-x86", "i686-unknown-linux-gnu", rlib, solib)
+ 		} else if ctx.Config().BuildOS == android.LinuxMusl {
+-			p.Target.Linux_musl_x86_64.addPrebuiltToTarget(ctx, name, rustDir, "linux-musl-x86", "x86_64-unknown-linux-musl", rlib, solib)
+-			p.Target.Linux_musl_x86.addPrebuiltToTarget(ctx, name, rustDir, "linux-musl-x86", "i686-unknown-linux-musl", rlib, solib)
++			if ctx.Config().BuildArch == android.Arm64 {
++				p.Target.Linux_musl_arm64.addPrebuiltToTarget(ctx, name, rustDir, "linux-musl-arm64", "aarch64-unknown-linux-musl", rlib, solib)
++			} else {
++				p.Target.Linux_musl_x86_64.addPrebuiltToTarget(ctx, name, rustDir, "linux-musl-x86", "x86_64-unknown-linux-musl", rlib, solib)
++				p.Target.Linux_musl_x86.addPrebuiltToTarget(ctx, name, rustDir, "linux-musl-x86", "i686-unknown-linux-musl", rlib, solib)
++			}
+ 		} else if ctx.Config().BuildOS == android.Darwin {
+ 			p.Target.Darwin_x86_64.addPrebuiltToTarget(ctx, name, rustDir, "darwin-x86", "x86_64-apple-darwin", rlib, solib)
+ 		}
+@@ -171,6 +182,8 @@ func rustToolchainFilegroupFactory() android.Module {
+ 		} else if ctx.Config().BuildOS == android.LinuxMusl {
+ 			if ctx.Config().BuildArch == android.X86_64 {
+ 				archTriple = "x86_64-unknown-linux-musl"
++			} else if ctx.Config().BuildArch == android.Arm64 {
++				archTriple = "aarch64-unknown-linux-musl"
+ 			} else {
+ 				archTriple = "i686-unknown-linux-musl"
+ 			}

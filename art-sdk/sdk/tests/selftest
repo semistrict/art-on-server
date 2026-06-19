@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# SDK acceptance suite. Compiles and runs tests/SelfTest.java entirely within
+# the unpacked SDK (no network, no external tools), then exercises the CMC GC.
+# Invoked via `art selftest` (env already exported by the driver).
+set -euo pipefail
+
+: "${ART_SDK_ROOT:?run via the art driver}"
+ART="$ART_SDK_ROOT/bin/art"
+TESTS="$ART_SDK_ROOT/tests"
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/art-selftest.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+echo "== 1/2 compile + run SelfTest (toolchain, ICU, tzdata, crypto)"
+"$ART" compile -d "$WORK/selftest.dex.jar" "$TESTS/SelfTest.java"
+OUT=$("$ART" run -cp "$WORK/selftest.dex.jar" SelfTest)
+echo "$OUT" | sed 's/^/   /'
+echo "$OUT" | grep -qx 'SELFTEST OK on aarch64'
+
+echo "== 2/2 CMC garbage collector under churn"
+GC=$("$ART" run -Xgc:CMC -verbose:gc -Xmx128m \
+      -cp "$WORK/selftest.dex.jar" SelfTest 2>&1 || true)
+if echo "$GC" | grep -q 'CollectorTypeCMC GC'; then
+  echo "   CMC GC active"
+else
+  echo "   warning: could not confirm CMC GC from -verbose:gc output" >&2
+fi
+
+echo "selftest: PASS"

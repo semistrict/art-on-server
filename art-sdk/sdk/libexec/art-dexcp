@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Resolve a classpath for the ART runtime. Any entry that is a standard JVM
+# artifact (.class jar from Maven/Gradle, or a directory of .class files) is
+# transparently compiled to dex with d8 and cached by content hash, so the
+# runtime consumes the entire JVM ecosystem unchanged. Entries that are
+# already dex pass through untouched. Prints the resolved (all-dex) classpath
+# to stdout; d8 progress goes to stderr.
+#
+# Invoked via the `art` driver, which exports ART_SDK_ROOT and the runtime env.
+set -euo pipefail
+
+: "${ART_SDK_ROOT:?run via the art driver}"
+ART="$ART_SDK_ROOT/bin/art"
+LIB="$ART_SDK_ROOT/lib"
+CACHE="${ARTSDK_CACHE:-$HOME/.cache/artsdk}/dex"
+mkdir -p "$CACHE"
+
+# Core .class stubs give d8 its desugaring/library context.
+LIBARGS=()
+for j in "$LIB"/compile/*.jar; do
+  [ -e "$j" ] && LIBARGS+=(--lib "$j")
+done
+
+is_dex_jar() {  # archive already contains a classes*.dex?
+  unzip -l "$1" 2>/dev/null | grep -qE ' classes[0-9]*\.dex$'
+}
+
+entry_key() {
+  local e="$1"
+  if [ -d "$e" ]; then
+    { cd "$e" && find . -type f \( -name '*.class' -o -name '*.dex' \) -exec sha256sum {} + \
+        | LC_ALL=C sort; } | sha256sum | cut -d' ' -f1
+  else
+    sha256sum "$e" | cut -d' ' -f1
+  fi
+}
+
+# Dex one entry; echoes a runtime-ready path on stdout.
+resolve_entry() {
+  local e="$1"
+  if [ ! -e "$e" ]; then printf '%s' "$e"; return; fi          # pass nonexistent through
+  if { [ -f "$e" ] && is_dex_jar "$e"; } \
+     || [[ "$e" == *.dex ]] \
+     || { [ -d "$e" ] && [ -f "$e/classes.dex" ]; }; then
+    printf '%s' "$e"; return                                    # already dex
+  fi
+
+  local key out
+  key=$(entry_key "$e")
+  out="$CACHE/$key.jar"
+  if [ ! -f "$out" ]; then
+    local input="$e" tmpzip="" tmp="$CACHE/.in-progress.$$.jar"
+    if [ -d "$e" ]; then                                        # zip a class dir for d8
+      tmpzip="$CACHE/.dir.$$.jar"
+      ( cd "$e" && zip -q -r "$tmpzip" . -i '*.class' )
+      input="$tmpzip"
+    fi
+    "$ART" d8 --release --min-api 34 "${LIBARGS[@]}" --output "$tmp" "$input" >&2
+    mv "$tmp" "$out"
+    [ -n "$tmpzip" ] && rm -f "$tmpzip"
+  fi
+  printf '%s' "$out"
+}
+
+IFS=: read -ra ENTRIES <<< "${1:-}"
+OUT=""
+for e in "${ENTRIES[@]}"; do
+  [ -n "$e" ] || continue
+  OUT="$OUT${OUT:+:}$(resolve_entry "$e")"
+done
+printf '%s\n' "$OUT"

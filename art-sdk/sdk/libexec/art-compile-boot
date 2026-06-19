@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# art compile-boot  (-> $1 = cache dir for this install)
+# AOT-compile the SDK boot classpath into a boot image with dex2oat, keyed to
+# the install location (the boot image embeds absolute dex paths, so it lives
+# in the per-install cache rather than the relocatable tarball). Invoked via
+# the `art` driver, which exports ART_SDK_ROOT and BOOTCLASSPATH.
+set -euo pipefail
+
+: "${ART_SDK_ROOT:?run via the art driver}"
+: "${BOOTCLASSPATH:?run via the art driver}"
+BIN="$ART_SDK_ROOT/bin"
+DEX2OAT="$BIN/dex2oat"
+
+OUT="${1:?usage: art-compile-boot <out-dir>}"
+IMGDIR="$OUT/arm64"
+mkdir -p "$IMGDIR.tmp"
+
+# dex2oat wants one --dex-file/--dex-location per boot jar, in BCP order.
+DEXARGS=()
+IFS=: read -ra JARS <<< "$BOOTCLASSPATH"
+for j in "${JARS[@]}"; do
+  DEXARGS+=("--dex-file=$j" "--dex-location=$j")
+done
+
+echo "compiling boot image for $ART_SDK_ROOT (this runs once per install)..."
+"$DEX2OAT" \
+  --runtime-arg -Xms64m --runtime-arg -Xmx512m \
+  --runtime-arg -Xbootclasspath:"$BOOTCLASSPATH" \
+  --runtime-arg -Xbootclasspath-locations:"$BOOTCLASSPATH" \
+  "${DEXARGS[@]}" \
+  --instruction-set=arm64 \
+  --base=0x70000000 \
+  --compiler-filter=speed \
+  --image="$IMGDIR.tmp/boot.art" \
+  --oat-file="$IMGDIR.tmp/boot.oat"
+
+rm -rf "$IMGDIR"
+mv "$IMGDIR.tmp" "$IMGDIR"
+echo "boot image: $IMGDIR/boot.art"

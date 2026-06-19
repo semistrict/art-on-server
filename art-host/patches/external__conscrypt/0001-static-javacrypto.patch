@@ -1,0 +1,51 @@
+From: art-host fork <ramon@echophase.com>
+Subject: [PATCH] libjavacrypto_static for static dalvikvm
+
+- Android.bp: static variant built with -DSTATIC_LIB
+- jniload.cc: extern "C" on JNI_OnLoad_conscrypt so the C-linkage weak
+  declaration in ART binds to it
+---
+diff --git a/Android.bp b/Android.bp
+index 5c89f982..acee0653 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -939,3 +939,24 @@ module_exports {
+         },
+     },
+ }
++
++// art-host fork: static variant for the fully static host dalvikvm
++// (dalvikvms). STATIC_LIB makes jniload.cc export JNI_OnLoad_conscrypt,
++// which the static registry in art's java_vm_ext.cc dispatches.
++cc_library_static {
++    name: "libjavacrypto_static",
++    defaults: ["libjavacrypto-defaults"],
++    visibility: ["//art/dalvikvm"],
++    device_supported: false,
++    host_supported: true,
++    cflags: [
++        "-DJNI_JARJAR_PREFIX=com/android/",
++        "-DSTATIC_LIB",
++    ],
++    header_libs: ["libnativehelper_header_only"],
++    static_libs: [
++        "libcrypto",
++        "liblog",
++        "libssl",
++    ],
++}
+diff --git a/common/src/jni/main/cpp/conscrypt/jniload.cc b/common/src/jni/main/cpp/conscrypt/jniload.cc
+index c06cac3b..22a4e04f 100644
+--- a/common/src/jni/main/cpp/conscrypt/jniload.cc
++++ b/common/src/jni/main/cpp/conscrypt/jniload.cc
+@@ -53,7 +53,9 @@ jint libconscrypt_JNI_OnLoad(JavaVM* vm, void*) {
+ // Java >= 1.8). The manner in which the library is statically linked is implementation specific.
+ //
+ // See http://openjdk.java.net/jeps/178
+-CONSCRYPT_PUBLIC jint JNI_OnLoad_conscrypt(JavaVM* vm, void* reserved) {
++// art-host fork: extern "C" so the static registry in ART (which declares
++// this with C linkage) can bind to it.
++extern "C" CONSCRYPT_PUBLIC jint JNI_OnLoad_conscrypt(JavaVM* vm, void* reserved) {
+     return libconscrypt_JNI_OnLoad(vm, reserved);
+ }
+ 

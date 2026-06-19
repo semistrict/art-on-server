@@ -1,0 +1,61 @@
+From: art-host fork <ramon@echophase.com>
+Subject: [PATCH] soong changes for arm64 musl hosts
+
+- rust HostPrebuiltTag: arch-aware (linux-musl-arm64)
+- noOverride cflags: silence clang-22 diagnostics the pinned tree lacks
+- pathForInstall: arch-Common host modules install under linux-arm64
+---
+diff --git a/android/paths.go b/android/paths.go
+index 6612d37d3..3f6185add 100644
+--- a/android/paths.go
++++ b/android/paths.go
+@@ -2074,7 +2074,14 @@ func pathForInstall(ctx PathContext, os OsType, arch ArchType, partition string,
+ 		// other architectures.
+ 		archName := arch.String()
+ 		if os.Class == Host && (arch == X86_64 || arch == Common) {
+-			archName = "x86"
++			// art-host fork: arch-Common host modules (java) must install
++			// next to the real host arch so HostJavaToolPath (which uses
++			// BuildArch) finds them. Keep x86 on x86 hosts.
++			if ctx.Config().BuildArch == Arm64 {
++				archName = "arm64"
++			} else {
++				archName = "x86"
++			}
+ 		}
+ 		partitionPaths = []string{"host", osName + "-" + archName, partition}
+ 	}
+diff --git a/cc/config/global.go b/cc/config/global.go
+index 5011acd50..0358db1c3 100644
+--- a/cc/config/global.go
++++ b/cc/config/global.go
+@@ -237,6 +237,15 @@ var (
+ 	// should be the last resort, because it prevents all code in Android from
+ 	// opting into the warning.
+ 	noOverrideGlobalCflags = []string{
++		// art-host fork: the tree pins clang-r547379 (clang 20) but arm64
++		// hosts build with clang-r584948b (clang 22); silence diagnostics
++		// introduced in between that -Werror would otherwise promote. Must
++		// live here (not commonGlobalCflags): modules passing their own
++		// -Wall would re-enable them.
++		"-Wno-unterminated-string-initialization",
++		"-Wno-unnecessary-virtual-specifier",
++		"-Wno-nontrivial-memcall",
++
+ 		"-Werror=bool-operation",
+ 		"-Werror=dangling",
+ 		"-Werror=format-insufficient-args",
+diff --git a/rust/config/global.go b/rust/config/global.go
+index 907316fab..031eac76e 100644
+--- a/rust/config/global.go
++++ b/rust/config/global.go
+@@ -142,6 +142,9 @@ func init() {
+ 
+ func HostPrebuiltTag(config android.Config) string {
+ 	if config.UseHostMusl() {
++		if config.BuildArch == android.Arm64 {
++			return "linux-musl-arm64"
++		}
+ 		return "linux-musl-x86"
+ 	} else {
+ 		return config.PrebuiltOS()

@@ -939,3 +939,24 @@ module_exports {
         },
     },
 }
+
+// art-host fork: static variant for the fully static host dalvikvm
+// (dalvikvms). STATIC_LIB makes jniload.cc export JNI_OnLoad_conscrypt,
+// which the static registry in art's java_vm_ext.cc dispatches.
+cc_library_static {
+    name: "libjavacrypto_static",
+    defaults: ["libjavacrypto-defaults"],
+    visibility: ["//art/dalvikvm"],
+    device_supported: false,
+    host_supported: true,
+    cflags: [
+        "-DJNI_JARJAR_PREFIX=com/android/",
+        "-DSTATIC_LIB",
+    ],
+    header_libs: ["libnativehelper_header_only"],
+    static_libs: [
+        "libcrypto",
+        "liblog",
+        "libssl",
+    ],
+}

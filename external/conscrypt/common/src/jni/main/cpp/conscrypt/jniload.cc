@@ -53,7 +53,9 @@ jint libconscrypt_JNI_OnLoad(JavaVM* vm, void*) {
 // Java >= 1.8). The manner in which the library is statically linked is implementation specific.
 //
 // See http://openjdk.java.net/jeps/178
-CONSCRYPT_PUBLIC jint JNI_OnLoad_conscrypt(JavaVM* vm, void* reserved) {
+// art-host fork: extern "C" so the static registry in ART (which declares
+// this with C linkage) can bind to it.
+extern "C" CONSCRYPT_PUBLIC jint JNI_OnLoad_conscrypt(JavaVM* vm, void* reserved) {
     return libconscrypt_JNI_OnLoad(vm, reserved);
 }
 

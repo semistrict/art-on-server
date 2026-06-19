@@ -1,0 +1,6 @@
+[
+  {
+    "@location": "method:com.android.org.conscrypt.TrustManagerImpl#checkServerTrusted(X509Certificate[],byte[],byte[],String,String)",
+    "value": "com.android.org.conscrypt.flags.Flags.FLAG_CERTIFICATE_TRANSPARENCY_CHECKSERVERTRUSTED_API"
+  }
+]

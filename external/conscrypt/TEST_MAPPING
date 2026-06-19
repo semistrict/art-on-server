@@ -1,0 +1,38 @@
+{
+  "presubmit": [
+    {
+      "name": "CtsLibcoreTestCases",
+      "options": [
+        {
+          "include-filter": "com.android.org.conscrypt"
+        },
+        {
+          "include-filter": "libcore.java.security"
+        },
+        {
+          "include-filter": "libcore.javax.net"
+        },
+        {
+          "include-filter": "libcore.java.net"
+        },
+        {
+          "include-filter": "android.net.ssl"
+        }
+      ]
+    },
+    {
+      "name": "CtsSecurityTestCases",
+      "options": [
+        {
+          "include-filter": "android.security.cts.CertBlocklistTest"
+        },
+        {
+          "include-filter": "android.security.cts.CertBlocklistFileTest"
+        }
+      ]
+    },
+    {
+      "name": "ConscryptPrivateTestCases"
+    }
+  ]
+}

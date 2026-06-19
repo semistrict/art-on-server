@@ -297,14 +297,17 @@ static bool ShouldUseUserfaultfd() {
   static_assert(kUseBakerReadBarrier || kUseTableLookupReadBarrier);
 #ifdef __linux__
   // Use CMC/CC if that is being explicitly asked for on cmdline. Otherwise,
-  // always use CC on host. On target, use CMC only if system properties says so
-  // and the kernel supports it.
+  // default to CMC whenever the kernel supports userfaultfd.
+  //
+  // art-host fork: upstream defaults the *host* to CC, but this fork only ports
+  // CMC to native 8-byte object references -- the CC collector is unsupported
+  // and aborts. So on host, default to CMC unconditionally (gated only on kernel
+  // uffd support); on target, keep the system-property gate, matching upstream.
   gc::CollectorType gc_type = FetchCmdlineGcType();
   return gc_type == gc::CollectorType::kCollectorTypeCMC ||
          (gc_type == gc::CollectorType::kCollectorTypeNone &&
-          kIsTargetAndroid &&
-          SysPropSaysUffdGc() &&
-          KernelSupportsUffd());
+          KernelSupportsUffd() &&
+          (!kIsTargetAndroid || SysPropSaysUffdGc()));
 #else
   return false;
 #endif

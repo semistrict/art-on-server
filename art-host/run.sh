@@ -12,7 +12,7 @@ run_in_vm() {
 
 run_in_vm scripts/10-sync.sh
 run_in_vm scripts/30-toolchain.sh
-run_in_vm scripts/35-apply-patches.sh
+run_in_vm scripts/35-stage-sources.sh
 run_in_vm scripts/40-bootstrap.sh
 run_in_vm scripts/50-build-art.sh
 run_in_vm scripts/55-runtime-data.sh

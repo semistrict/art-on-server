@@ -10,14 +10,31 @@ JIT** (codegen, intrinsics, stubs, and the calling convention). `-Xmx` well past
 
 ## Layout
 
-- [`art-host/`](art-host/) — the ART fork and the host build pipeline. Builds
+The forked AOSP source is **vendored directly in this repo** — one directory per
+project, mirroring AOSP paths. Each project is imported at its AOSP base commit and
+every change lands as a separate commit (`git log -- <project>`), so the fork reads
+as ordinary source plus history rather than a patch set:
+
+- [`art/`](art/) — **platform/art** with the native 64-bit-reference fork (runtime,
+  CMC GC, switch interpreter, and the optimizing JIT) plus a statically-linkable
+  `dalvikvm`. The substantive change.
+- [`libcore/`](libcore/), [`bionic/`](bionic/), [`external/musl/`](external/musl/),
+  [`external/conscrypt/`](external/conscrypt/), [`build/make/`](build/make/),
+  [`build/soong/`](build/soong/), [`libnativehelper/`](libnativehelper/) — arm64-musl
+  host enablement (small per-project changes; musl also carries a VDSO `clock_gettime` fix).
+
+Two upstream projects are **not** vendored — their size is dominated by non-source
+data, so their few-file changes stay as patches in
+[`art-host/patches/`](art-host/patches/): `external/icu` (~430 MB, mostly locale data)
+and `prebuilts/rust` (~13 GB prebuilt toolchain).
+
+- [`art-host/`](art-host/) — the host build pipeline. Builds
   `dalvikvm`/`libart`/`dex2oat` for linux-arm64 against a musl toolchain
   (statically linkable). Contains:
-  - `patches/art/0001-*.patch` — the native-64-bit-reference + static-dalvikvm fork.
-  - `patches/{bionic,build__make,build__soong,external__*,libcore,…}` — arm64-musl host enablement.
-  - `scripts/` — sync → toolchain → patch → bootstrap → build → static-link.
+  - `scripts/` — sync → toolchain → **stage-sources** (rsync the vendored source over
+    the synced tree, then apply the icu/rust patches) → bootstrap → build → static-link.
   - `test/` — GC/card-table/large-object/big-heap gates (72/74/76/78) and
-    optimizing-JIT 64-bit-reference correctness gates (79–82); the interpreter
+    optimizing-JIT 64-bit-reference correctness gates (79–86); the interpreter
     (`-Xint`) is the oracle the JIT must match.
   - `run.sh` — orchestrates the build and the full acceptance suite in the VM.
 

@@ -2074,7 +2074,14 @@ func pathForInstall(ctx PathContext, os OsType, arch ArchType, partition string,
 		// other architectures.
 		archName := arch.String()
 		if os.Class == Host && (arch == X86_64 || arch == Common) {
-			archName = "x86"
+			// art-host fork: arch-Common host modules (java) must install
+			// next to the real host arch so HostJavaToolPath (which uses
+			// BuildArch) finds them. Keep x86 on x86 hosts.
+			if ctx.Config().BuildArch == Arm64 {
+				archName = "arm64"
+			} else {
+				archName = "x86"
+			}
 		}
 		partitionPaths = []string{"host", osName + "-" + archName, partition}
 	}

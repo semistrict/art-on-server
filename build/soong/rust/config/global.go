@@ -142,6 +142,9 @@ func init() {
 
 func HostPrebuiltTag(config android.Config) string {
 	if config.UseHostMusl() {
+		if config.BuildArch == android.Arm64 {
+			return "linux-musl-arm64"
+		}
 		return "linux-musl-x86"
 	} else {
 		return config.PrebuiltOS()

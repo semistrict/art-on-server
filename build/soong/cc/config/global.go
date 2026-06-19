@@ -237,6 +237,15 @@ var (
 	// should be the last resort, because it prevents all code in Android from
 	// opting into the warning.
 	noOverrideGlobalCflags = []string{
+		// art-host fork: the tree pins clang-r547379 (clang 20) but arm64
+		// hosts build with clang-r584948b (clang 22); silence diagnostics
+		// introduced in between that -Werror would otherwise promote. Must
+		// live here (not commonGlobalCflags): modules passing their own
+		// -Wall would re-enable them.
+		"-Wno-unterminated-string-initialization",
+		"-Wno-unnecessary-virtual-specifier",
+		"-Wno-nontrivial-memcall",
+
 		"-Werror=bool-operation",
 		"-Werror=dangling",
 		"-Werror=format-insufficient-args",

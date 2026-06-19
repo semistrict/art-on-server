@@ -1,0 +1,39 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+bootstrap_go_package {
+    name: "soong-filesystem",
+    pkgPath: "android/soong/filesystem",
+    deps: [
+        "blueprint",
+        "soong",
+        "soong-android",
+        "soong-bpf", // for testing
+        "soong-java", // for testing
+        "soong-linkerconfig",
+        "soong-phony", // for testing
+    ],
+    srcs: [
+        "aconfig_files.go",
+        "android_device.go",
+        "android_device_product_out.go",
+        "avb_add_hash_footer.go",
+        "avb_gen_vbmeta_image.go",
+        "bootimg.go",
+        "bootconfig.go",
+        "filesystem.go",
+        "fsverity_metadata.go",
+        "logical_partition.go",
+        "raw_binary.go",
+        "super_image.go",
+        "system_image.go",
+        "system_other.go",
+        "vbmeta.go",
+        "testing.go",
+    ],
+    testSrcs: [
+        "filesystem_test.go",
+    ],
+    pluginFor: ["soong_build"],
+}

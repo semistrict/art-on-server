@@ -1,0 +1,49 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+bootstrap_go_package {
+    name: "soong-aconfig",
+    pkgPath: "android/soong/aconfig",
+    deps: [
+        "blueprint",
+        "blueprint-pathtools",
+        "sbox_proto",
+        "soong",
+        "soong-android",
+    ],
+    srcs: [
+        "aconfig_declarations.go",
+        "aconfig_values.go",
+        "aconfig_value_set.go",
+        "all_aconfig_declarations.go",
+        "all_aconfig_declarations_extension.go",
+        "exported_java_aconfig_library.go",
+        "init.go",
+        "testing.go",
+    ],
+    testSrcs: [
+        "aconfig_declarations_test.go",
+        "aconfig_values_test.go",
+        "aconfig_value_set_test.go",
+        "all_aconfig_declarations_extension_test.go",
+    ],
+    pluginFor: ["soong_build"],
+}
+
+// All FlaggedApi flags associated with platform API.
+// By default this uses the platform APIs associated with android.jar
+// but other verticals/platforms can override via soong config setting.
+all_aconfig_declarations {
+    name: "all_aconfig_declarations",
+    visibility: [
+        "//vendor:__subpackages__", // for vendor extensions
+    ],
+    api_signature_files: [
+        ":frameworks-base-api-current.txt",
+        ":frameworks-base-api-system-current.txt",
+        ":frameworks-base-api-system-server-current.txt",
+        ":frameworks-base-api-module-lib-current.txt",
+    ],
+    finalized_flags_file: ":latest-finalized-flags",
+}

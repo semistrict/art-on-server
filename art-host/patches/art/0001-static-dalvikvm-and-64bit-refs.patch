@@ -2485,10 +2485,10 @@ index 717ac5fe76..55e531d584 100644
    // this will be considered black in the current GC cycle. Aligned up to page
    // size.
 diff --git a/runtime/gc/heap.cc b/runtime/gc/heap.cc
-index dee86de3d1..0b68da879b 100644
+index dee86de3d1..9658f38246 100644
 --- a/runtime/gc/heap.cc
 +++ b/runtime/gc/heap.cc
-@@ -571,6 +571,66 @@ Heap::Heap(size_t initial_size,
+@@ -571,6 +571,80 @@ Heap::Heap(size_t initial_size,
  
    std::string error_str;
    MemMap non_moving_space_mem_map;
@@ -2517,23 +2517,37 @@ index dee86de3d1..0b68da879b 100644
 +      : capacity_ * (needs_main_space_2 ? 2 : 1);
 +  const size_t contiguous_reservation_size = RoundUp(non_moving_space_capacity, gPageSize) +
 +      main_space_reservation + 2 * space::RegionSpace::kRegionSize;
-+  // A heap that fits under 4 GiB is placed entirely in low memory so that every object
-+  // reference is addressable in 32 bits. That is what lets the optimizing JIT -- whose
-+  // codegen still treats references as 32-bit; see DataType::Is64BitType -- run
-+  // correctly: it is the original ART placement. A larger heap cannot fit, so it is
-+  // placed wherever the kernel will put it (typically high) and must run -Xint until
-+  // the JIT is taught native-width references. This single decision drives BOTH the
-+  // contiguous reservation below AND the large-object space: the mark-compact
-+  // collector indexes large objects through a bitmap sized for the heap range, so the
-+  // LOS must sit on the same side of the 4 GiB line as the main heap.
-+  const bool place_heap_below_4gb = contiguous_reservation_size <=
-+      size_t{4} * GB - reinterpret_cast<uintptr_t>(kPreferredAllocSpaceBegin);
++  // art-host fork (always-high heap): object references are full machine-word native
++  // pointers (DataType::Is64BitType(kReference) is true; OSR/deopt/GC all handle 8-byte
++  // refs), so the heap no longer has to live under 4 GiB and we want it NOT to. Placing
++  // the heap high regardless of -Xmx means every object reference always has its high
++  // bits set, giving one uniform 64-bit pointer code path with no small-heap "below
++  // 4 GiB" special case -- and it makes even small-heap test runs exercise the 64-bit
++  // paths where pointer-truncation bugs would otherwise hide. So the normal host runtime
++  // heap is always placed high (low_4gb=false). The only configurations that still
++  // require low placement are the ones that explicitly demand a low fixed base above:
++  // the CC collector (needs a contiguous 2 * Xmx region anchored low) and the
++  // deterministic AOT compiler (kCollectorTypeMS + IsAotCompiler). The boot-image
++  // carve-out path uses heap_reservation instead of this reservation and is unaffected.
++  // This single decision drives BOTH the contiguous reservation below AND the
++  // large-object space: the mark-compact collector indexes large objects through a
++  // bitmap sized for the heap range, so the LOS must sit on the same side of the 4 GiB
++  // line as the main heap.
++  const bool place_heap_below_4gb =
++      foreground_collector_type_ == kCollectorTypeCC ||
++      (foreground_collector_type_ == kCollectorTypeMS && Runtime::Current()->IsAotCompiler());
 +  MemMap contiguous_heap_reservation;
 +  if (separate_non_moving_space && !heap_reservation.IsValid()) {
 +    // Over-reserving address space is free: PROT_NONE commits nothing and the unused
 +    // tail is released when this reservation is destroyed at the end of the constructor.
-+    uint8_t* reservation_begin = (request_begin != nullptr) ? request_begin
-+                                                            : kPreferredAllocSpaceBegin;
++    // When a caller demanded a specific base (CC / deterministic AOT set request_begin
++    // to a low fixed address), honour it. Otherwise, for the always-high host runtime
++    // path, let the kernel choose the base (nullptr) so arm64 returns a high (>4 GiB)
++    // address rather than the low kPreferredAllocSpaceBegin -- the latter would let a
++    // small heap map low and defeat the always-high placement.
++    uint8_t* reservation_begin =
++        (request_begin != nullptr) ? request_begin
++                                   : (place_heap_below_4gb ? kPreferredAllocSpaceBegin : nullptr);
 +    while (true) {
 +      contiguous_heap_reservation = MemMap::MapAnonymous("heap address-space reservation",
 +                                                         reservation_begin,
@@ -2555,7 +2569,7 @@ index dee86de3d1..0b68da879b 100644
    if (separate_non_moving_space) {
      ScopedTrace trace2("Create separate non moving space");
      // If we are the zygote, the non moving space becomes the zygote space when we run
-@@ -583,6 +643,14 @@ Heap::Heap(size_t initial_size,
+@@ -583,6 +657,14 @@ Heap::Heap(size_t initial_size,
      if (heap_reservation.IsValid()) {
        non_moving_space_mem_map = heap_reservation.RemapAtEnd(
            heap_reservation.Begin(), space_name, PROT_READ | PROT_WRITE, &error_str);
@@ -2570,7 +2584,7 @@ index dee86de3d1..0b68da879b 100644
      } else {
        non_moving_space_mem_map = MapAnonymousPreferredAddress(
            space_name, request_begin, non_moving_space_capacity, &error_str);
-@@ -597,7 +665,16 @@ Heap::Heap(size_t initial_size,
+@@ -597,7 +679,16 @@ Heap::Heap(size_t initial_size,
    // Attempt to create 2 mem maps at or after the requested begin.
    if (foreground_collector_type_ != kCollectorTypeCC) {
      ScopedTrace trace2("Create main mem map");
@@ -2588,7 +2602,7 @@ index dee86de3d1..0b68da879b 100644
        main_mem_map_1 = MapAnonymousPreferredAddress(
            kMemMapSpaceName[0], request_begin, capacity_, &error_str);
      } else {
-@@ -622,8 +699,17 @@ Heap::Heap(size_t initial_size,
+@@ -622,8 +713,17 @@ Heap::Heap(size_t initial_size,
        background_collector_type_ == kCollectorTypeSS ||
        foreground_collector_type_ == kCollectorTypeSS) {
      ScopedTrace trace2("Create main mem map 2");
@@ -2608,7 +2622,7 @@ index dee86de3d1..0b68da879b 100644
      CHECK(main_mem_map_2.IsValid()) << error_str;
    }
  
-@@ -650,8 +736,14 @@ Heap::Heap(size_t initial_size,
+@@ -650,8 +750,14 @@ Heap::Heap(size_t initial_size,
    if (foreground_collector_type_ == kCollectorTypeCC) {
      CHECK(separate_non_moving_space);
      // Reserve twice the capacity, to allow evacuating every region for explicit GCs.
@@ -2625,20 +2639,19 @@ index dee86de3d1..0b68da879b 100644
      CHECK(region_space_mem_map.IsValid()) << "No region space mem map";
      region_space_ = space::RegionSpace::Create(
          kRegionSpaceName, std::move(region_space_mem_map), use_generational_gc_);
-@@ -696,12 +788,26 @@ Heap::Heap(size_t initial_size,
+@@ -696,12 +802,25 @@ Heap::Heap(size_t initial_size,
    }
    CHECK(non_moving_space_ != nullptr);
    CHECK(!non_moving_space_->CanMoveObjects());
-+  // art-host fork (large heap): pick a large-object space that works for the heap's placement.
-+  // The map-based LOS mmaps each large object wherever the kernel puts it, so above 4 GiB the
-+  // objects scatter past the large-object mark bitmap (the mark-compact collector then indexes it
-+  // out of bounds and crashes). The free-list LOS is a single contiguous map with a bitmap bounded
-+  // to its own range, so it is correct above 4 GiB -- but it reserves the whole capacity up front,
-+  // which does not fit under 4 GiB alongside the main space. So: free-list for heaps above 4 GiB,
-+  // map for heaps that fit below it.
++  // art-host fork (always-high heap): pick a large-object space that works for the heap's
++  // placement. The map-based LOS mmaps each large object wherever the kernel puts it, so above
++  // 4 GiB the objects scatter past the large-object mark bitmap (the mark-compact collector then
++  // indexes it out of bounds and crashes). The free-list LOS is a single contiguous map with a
++  // bitmap bounded to its own range, so it is correct above 4 GiB. Since the normal host runtime
++  // heap is now always placed high (place_heap_below_4gb is false unless CC / deterministic AOT
++  // forces low), use the free-list LOS for it. The map-based LOS is kept only for the low paths,
++  // where it fits under 4 GiB alongside the main space.
 +  if (!place_heap_below_4gb && large_object_space_type == space::LargeObjectSpaceType::kMap) {
-+    LOG(INFO) << "Heap exceeds 4 GiB; using the free-list large-object space "
-+              << "(the map-based LOS bitmap cannot bound large objects above 4 GiB).";
 +    large_object_space_type = space::LargeObjectSpaceType::kFreeList;
 +  }
    // Allocate the large object space.
@@ -2654,7 +2667,7 @@ index dee86de3d1..0b68da879b 100644
      CHECK(large_object_space_ != nullptr) << "Failed to create large object space";
    } else {
      // Disable the large object space by making the cutoff excessively large.
-@@ -730,8 +836,30 @@ Heap::Heap(size_t initial_size,
+@@ -730,8 +849,30 @@ Heap::Heap(size_t initial_size,
    // Start at 4 KB, we can be sure there are no spaces mapped this low since the address range is
    // reserved by the kernel.
    static constexpr size_t kMinHeapAddress = 4 * KB;
@@ -2687,7 +2700,7 @@ index dee86de3d1..0b68da879b 100644
    CHECK(card_table_.get() != nullptr) << "Failed to create card table";
    if (foreground_collector_type_ == kCollectorTypeCC && kUseTableLookupReadBarrier) {
      rb_table_.reset(new accounting::ReadBarrierTable());
-@@ -887,7 +1015,10 @@ MemMap Heap::MapAnonymousPreferredAddress(const char* name,
+@@ -887,7 +1028,10 @@ MemMap Heap::MapAnonymousPreferredAddress(const char* name,
                                        request_begin,
                                        capacity,
                                        PROT_READ | PROT_WRITE,

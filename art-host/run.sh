@@ -33,5 +33,7 @@ run_in_vm test/82-jit-intrinsics.sh
 run_in_vm test/83-jit-gcroots.sh
 run_in_vm test/84-jit-deopt.sh
 run_in_vm test/85-jit-osr.sh
+# Host-musl VDSO fast path for clock_gettime (System.nanoTime on hot loops).
+run_in_vm test/86-vdso-clock.sh
 
 echo "art-host run: OK"

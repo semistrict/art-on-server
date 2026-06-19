@@ -45,7 +45,7 @@ point (heap / live-set)     target   jdk26-G1   jdk26-ZGC   art-jit (CMC)
 ```
 jdk26-ZGC  15282 MB/s
 jdk26-G1   13915 MB/s
-art-CMC     2112 MB/s     (was 496 before the OSR fix below)
+art-CMC    ~2236 MB/s     (was 496; 30x -> 8.2x with OSR -> 6.8x with the VDSO fix)
 ```
 
 ## What the numbers say
@@ -57,7 +57,15 @@ art-CMC     2112 MB/s     (was 496 before the OSR fix below)
   (~31× off ZGC) was because the hot allocation loop ran in the *switch interpreter* the whole time:
   OSR (On-Stack-Replacement, how a long-running loop migrates from interpreter to JIT) had been
   *disabled* as a workaround for the 64-bit-reference port (see below). With OSR fixed and enabled the
-  loop runs compiled and the uncapped rate is **2112 MB/s (~7× ZGC)** — a 4.3× jump from one fix.
+  loop runs compiled and the uncapped rate jumped to **~1863 MB/s (~8× ZGC)** — a 3.8× jump from one fix.
+- **A second fix — `System.nanoTime()` was a syscall.** Profiling the result showed ~36% of mutator
+  CPU in `System.nanoTime() → musl clock_gettime`, going through a real **syscall** instead of the
+  kernel VDSO (~230 ns vs ~16 ns). Root cause: the arm64 Linux VDSO exports symbols only via
+  `DT_GNU_HASH`, but stock musl's `__vdsosym` parsed only the SysV `DT_HASH` (absent), so it never
+  resolved `__kernel_clock_gettime` and fell back to the syscall permanently. Fixed in
+  `patches/external__musl/0001-vdso-gnu-hash-symbol-resolution` (teach `__vdsosym` to read GNU hash);
+  HyperAlloc's allocation loop calls `nanoTime` per iteration, so this lifts the uncapped rate to
+  **~2236 MB/s (~6.8× ZGC)**. Gate: `art-host/test/86-vdso-clock.sh` (asserts the VDSO fast path).
 - **The residual ~7× gap is collector throughput, not pointer width.** ZGC also uses uncompressed
   64-bit references and sustains 15 GB/s; the JMH result (`art/jdk26 ≈ art/jdk26-nocoops`) confirms
   8-byte refs are not the cause. The remaining gap is per-small-object allocate+mark cost in ART's CMC

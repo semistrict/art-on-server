@@ -703,7 +703,10 @@ void Arm64JNIMacroAssembler::DecodeJNITransitionOrLocalJObject(ManagedRegister m
   ___ Tbnz(reg.X(), kGlobalOrWeakGlobalBit, Arm64JNIMacroLabel::Cast(slow_path)->AsArm64());
   ___ And(reg.X(), reg.X(), ~kIndirectRefKindMask);
   ___ Cbz(reg.X(), Arm64JNIMacroLabel::Cast(resume)->AsArm64());  // Skip load for null.
-  ___ Ldr(reg, MEM_OP(reg.X()));
+  // art-host fork (large heap): the decoded object is a native 8-byte reference; load it at full
+  // width (X). A W load truncates the returned reference above 4 GiB. (Reached when JNI stubs are
+  // AOT-compiled; on the JIT/-Xnoimage host path native methods use the generic JNI trampoline.)
+  ___ Ldr(reg.X(), MEM_OP(reg.X()));
 }
 
 void Arm64JNIMacroAssembler::TryToTransitionFromRunnableToNative(

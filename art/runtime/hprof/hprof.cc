@@ -661,7 +661,12 @@ class Hprof : public SingleRootVisitor {
     // U4: size of identifiers.  We're using addresses as IDs and our heap references are stored
     // as uint32_t.
     // Note of warning: hprof-conv hard-codes the size of identifiers to 4.
-    static_assert(sizeof(mirror::HeapReference<mirror::Object>) == sizeof(uint32_t),
+    // art-host fork (large heap): references are native pointer width.
+    // TODO(largeheap): widen HPROF object IDs to U8 (the id-size header plus
+    // all id writes) for valid dumps; until then heap dumps are not correct
+    // under the large-heap runtime. HPROF runs only on an explicit dump, so
+    // normal execution is unaffected.
+    static_assert(sizeof(mirror::HeapReference<mirror::Object>) >= sizeof(uint32_t),
                   "Unexpected HeapReference size");
     __ AddU4(sizeof(uint32_t));
 

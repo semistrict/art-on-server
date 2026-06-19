@@ -1013,9 +1013,13 @@ void GraphChecker::HandleLoop(HBasicBlock* loop_header) {
 }
 
 static bool IsSameSizeConstant(const HInstruction* insn1, const HInstruction* insn2) {
+  // art-host fork (large heap): IsWideType -- this is DEX vreg-equivalence of untyped DEX constants.
+  // An HNullConstant has type kReference but occupies ONE dex vreg, just like an HIntConstant, so it
+  // must stay "same size" as an int constant (the `const v0, 0` null/int-0 ambiguity). Is64BitType
+  // would wrongly make a native-pointer null a different size from int 0.
   return insn1->IsConstant()
       && insn2->IsConstant()
-      && DataType::Is64BitType(insn1->GetType()) == DataType::Is64BitType(insn2->GetType());
+      && DataType::IsWideType(insn1->GetType()) == DataType::IsWideType(insn2->GetType());
 }
 
 static bool IsConstantEquivalent(const HInstruction* insn1,

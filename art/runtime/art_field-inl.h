@@ -70,14 +70,15 @@ void ArtField::VisitArrayRoots(RootVisitorType& visitor,
   ArtField* first_field = &array->At(0);
   end_boundary = std::min(end_boundary, reinterpret_cast<uint8_t*>(first_field + array->size()));
   static constexpr size_t kFieldSize = sizeof(ArtField);
-  // Confirm the assumption that ArtField size is power of two. It's important
-  // as we assume so below (RoundUp).
-  static_assert(IsPowerOfTwo(kFieldSize));
+  // art-host fork (large heap): ArtField embeds a native-pointer-width GcRoot
+  // (declaring class), so its size is no longer a power of two; round the gap
+  // to a field boundary with a division instead of the power-of-two RoundUp.
   uint8_t* declaring_class =
       reinterpret_cast<uint8_t*>(first_field) + DeclaringClassOffset().Int32Value();
   // Jump to the first class to visit.
   if (declaring_class < start_boundary) {
-    declaring_class += RoundUp(start_boundary - declaring_class, kFieldSize);
+    size_t gap = start_boundary - declaring_class;
+    declaring_class += ((gap + kFieldSize - 1) / kFieldSize) * kFieldSize;
   }
   while (declaring_class < end_boundary) {
     visitor.VisitRoot(

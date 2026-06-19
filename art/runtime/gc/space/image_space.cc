@@ -399,7 +399,7 @@ class ImageSpace::PatchObjectVisitor final {
       return;
     }
     DCHECK_ALIGNED(array, sizeof(GcRoot<T>));
-    static_assert(sizeof(GcRoot<T>) == sizeof(uint32_t));
+    static_assert(sizeof(GcRoot<T>) == kHeapReferenceSize);
     uint32_t size = reinterpret_cast<uint32_t*>(array)[-1];
     for (uint32_t i = 0; i < size; ++i) {
       PatchGcRoot(array->GetGcRootAddress(i));
@@ -440,7 +440,7 @@ class ImageSpace::PatchObjectVisitor final {
   template <bool kMayBeNull = true, typename T>
   ALWAYS_INLINE void PatchGcRoot(/*inout*/GcRoot<T>* root) const
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    static_assert(sizeof(GcRoot<mirror::Class*>) == sizeof(uint32_t), "GcRoot size check");
+    static_assert(sizeof(GcRoot<mirror::Class*>) == kHeapReferenceSize, "GcRoot size check");
     T* old_value = root->template Read<kWithoutReadBarrier>();
     DCHECK(kMayBeNull || old_value != nullptr);
     if (!kMayBeNull || old_value != nullptr) {

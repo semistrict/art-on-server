@@ -65,30 +65,33 @@ class JitPatchesARM64 {
 
   using Uint64ToLiteralMap = ArenaSafeMap<uint64_t, vixl::aarch64::Literal<uint64_t>*>;
   using Uint32ToLiteralMap = ArenaSafeMap<uint32_t, vixl::aarch64::Literal<uint32_t>*>;
+  // art-host fork (large heap): a JIT root literal holds the 64-bit host address of a GcRoot slot
+  // in roots_data, which is mapped above 4 GiB on the host, so these literals must be 64-bit (was
+  // uint32_t). The value is loaded into an X register and dereferenced (GenerateGcRootFieldLoad).
   using StringToLiteralMap = ArenaSafeMap<StringReference,
-                                          vixl::aarch64::Literal<uint32_t>*,
+                                          vixl::aarch64::Literal<uint64_t>*,
                                           StringReferenceValueComparator>;
   using TypeToLiteralMap = ArenaSafeMap<TypeReference,
-                                        vixl::aarch64::Literal<uint32_t>*,
+                                        vixl::aarch64::Literal<uint64_t>*,
                                         TypeReferenceValueComparator>;
   using ProtoToLiteralMap = ArenaSafeMap<ProtoReference,
-                                         vixl::aarch64::Literal<uint32_t>*,
+                                         vixl::aarch64::Literal<uint64_t>*,
                                          ProtoReferenceValueComparator>;
 
   vixl::aarch64::Literal<uint32_t>* DeduplicateUint32Literal(uint32_t value);
   vixl::aarch64::Literal<uint64_t>* DeduplicateUint64Literal(uint64_t value);
   vixl::aarch64::Literal<uint32_t>* DeduplicateBootImageAddressLiteral(uint64_t address);
-  vixl::aarch64::Literal<uint32_t>* DeduplicateJitStringLiteral(
+  vixl::aarch64::Literal<uint64_t>* DeduplicateJitStringLiteral(
       const DexFile& dex_file,
       dex::StringIndex string_index,
       Handle<mirror::String> handle,
       CodeGenerationData* code_generation_data);
-  vixl::aarch64::Literal<uint32_t>* DeduplicateJitClassLiteral(
+  vixl::aarch64::Literal<uint64_t>* DeduplicateJitClassLiteral(
       const DexFile& dex_file,
       dex::TypeIndex type_index,
       Handle<mirror::Class> handle,
       CodeGenerationData* code_generation_data);
-  vixl::aarch64::Literal<uint32_t>* DeduplicateJitMethodTypeLiteral(
+  vixl::aarch64::Literal<uint64_t>* DeduplicateJitMethodTypeLiteral(
       const DexFile& dex_file,
       dex::ProtoIndex proto_index,
       Handle<mirror::MethodType> handle,

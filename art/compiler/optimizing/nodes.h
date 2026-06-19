@@ -4613,6 +4613,27 @@ class HInvoke : public HVariableInputSizeInstruction {
   // Return the number of outgoing vregs.
   uint32_t GetNumberOfOutVRegs() const { return number_of_out_vregs_; }
 
+  // Return the number of outgoing MACHINE slots (kVRegSize units) the arguments occupy when
+  // passed on the stack.
+  //
+  // art-host fork (large heap): a native object reference is a 64-bit value (Is64BitType), so a
+  // stack-passed reference argument takes TWO machine slots (a DoubleStackSlot), exactly like a
+  // long/double -- see InvokeDexCallingConventionVisitorARM64::GetNextLocation, which advances its
+  // stack cursor by 2 for any Is64BitType argument. GetNumberOfOutVRegs() is the dex `outs_size`,
+  // which counts a reference as a single vreg; it therefore UNDER-sizes the outgoing-argument frame
+  // region whenever references are passed on the stack, letting the marshalled reference overflow
+  // into the adjacent spill-slot region. This returns the correct machine width: dex out-vregs plus
+  // one extra slot per reference argument (longs/doubles already count as 2 dex vregs).
+  uint32_t GetNumberOfOutMachineVRegs() const {
+    uint32_t extra = 0u;
+    for (size_t i = 0, n = GetNumberOfArguments(); i != n; ++i) {
+      if (InputAt(i)->GetType() == DataType::Type::kReference) {
+        extra += 1u;
+      }
+    }
+    return number_of_out_vregs_ + extra;
+  }
+
   InvokeType GetInvokeType() const {
     return GetPackedField<InvokeTypeField>();
   }
@@ -8338,12 +8359,13 @@ class HIntermediateAddress final : public HExpression<2> {
  public:
   HIntermediateAddress(HInstruction* base_address, HInstruction* offset, uint32_t dex_pc)
       : HExpression(kIntermediateAddress,
-                    DataType::Type::kInt32,
+                    // art-host fork (large heap): an intermediate address is base_reference + offset,
+                    // i.e. a RAW 64-bit heap pointer with native 8-byte references. kInt64 (not
+                    // kReference: it is a computed address, not a GC-tracked object) so the address
+                    // arithmetic uses X registers and does not truncate array bases above 4 GiB.
+                    DataType::Type::kInt64,
                     SideEffects::DependsOnGC(),
                     dex_pc) {
-        DCHECK_EQ(DataType::Size(DataType::Type::kInt32),
-                  DataType::Size(DataType::Type::kReference))
-            << "kPrimInt and kPrimNot have different sizes.";
     SetRawInputAt(0, base_address);
     SetRawInputAt(1, offset);
   }

@@ -202,7 +202,13 @@ ManagedRegister Arm64ManagedRuntimeCallingConvention::CurrentParamRegister() {
   } else {
     size_t non_fp_arg_number = itr_args_ - itr_float_and_doubles_;
     ManagedRegister x_reg = kXArgumentRegisters[/* method */ 1u + non_fp_arg_number];
-    if (IsCurrentParamALong()) {
+    // art-host fork (large heap): a reference is native pointer width (8 bytes), so it
+    // occupies a full X register (like a long), matching CurrentParamSize() ==
+    // kObjectReferenceSize == 8. Returning the overlapping W register would make the
+    // JNI macro assembler's Store/Load size check (4u == size) fail with size 8 and
+    // would truncate references above 4 GiB. (The JNI calling convention below already
+    // routes references to X registers.)
+    if (IsCurrentParamALong() || IsCurrentParamAReference()) {
       return x_reg;
     } else {
       return Arm64ManagedRegister::FromWRegister(x_reg.AsArm64().AsOverlappingWRegister());

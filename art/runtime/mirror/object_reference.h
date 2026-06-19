@@ -35,7 +35,14 @@ class Object;
 
 // Classes shared with the managed side of the world need to be packed so that they don't have
 // extra platform specific padding.
-#define MANAGED PACKED(4)
+// art-host fork (large heap): keep the mirror classes packed (the field linker
+// fills alignment gaps tightly, matching packed layout). With native
+// pointer-width references, reference fields are 8 bytes and must be 8-aligned.
+// That is achieved by (a) padding the object header up to kObjectHeaderSize
+// (an object-alignment multiple) so the first instance field is 8-aligned, and
+// (b) the field linker placing reference fields first at the reference width.
+// Pack at the reference width so the struct alignment is 8.
+#define MANAGED PACKED(sizeof(uintptr_t))
 #define MIRROR_CLASS(desc) \
   static_assert(::art::mirror::IsMirroredDescriptor(desc), \
                 desc " is not a known mirror class. Please update" \
@@ -95,20 +102,31 @@ constexpr bool IsMirroredDescriptor(std::string_view desc) {
 template<bool kPoisonReferences, class MirrorType>
 class PtrCompression {
  public:
+  // art-host fork: encoded references are native pointer width (see below).
+  using EncodedReference = uintptr_t;
+
+  // art-host fork (large heap): heap references are NATIVE pointer width
+  // (HotSpot's uncompressed-oops model) rather than 32-bit. A reference is
+  // simply the object's address, so the heap is not capped at 4 GiB and need
+  // not live in low memory. "Compression" is the identity (poisoning still
+  // negates, for the debug heap-poisoning check). kHeapReferenceSize and
+  // kObjectReferenceSize are 8 to match; the JIT/AOT codegen and nterp derive
+  // their reference load/store width from those constants.
+
   // Compress reference to its bit representation.
-  static uint32_t Compress(MirrorType* mirror_ptr) {
-    uint32_t as_bits = reinterpret_cast32<uint32_t>(mirror_ptr);
+  static EncodedReference Compress(MirrorType* mirror_ptr) {
+    EncodedReference as_bits = reinterpret_cast<EncodedReference>(mirror_ptr);
     return kPoisonReferences ? -as_bits : as_bits;
   }
 
   // Uncompress an encoded reference from its bit representation.
-  static MirrorType* Decompress(uint32_t ref) {
-    uint32_t as_bits = kPoisonReferences ? -ref : ref;
-    return reinterpret_cast32<MirrorType*>(as_bits);
+  static MirrorType* Decompress(EncodedReference ref) {
+    EncodedReference as_bits = kPoisonReferences ? -ref : ref;
+    return reinterpret_cast<MirrorType*>(as_bits);
   }
 
   // Convert an ObjPtr to a compressed reference.
-  static uint32_t Compress(ObjPtr<MirrorType> ptr) REQUIRES_SHARED(Locks::mutator_lock_);
+  static EncodedReference Compress(ObjPtr<MirrorType> ptr) REQUIRES_SHARED(Locks::mutator_lock_);
 };
 
 // Value type representing a reference to a mirror::Object of type MirrorType.
@@ -159,8 +177,8 @@ class MANAGED ObjectReference {
     DCHECK(IsNull());
   }
 
-  // The encoded reference to a mirror::Object.
-  uint32_t reference_;
+  // The encoded reference to a mirror::Object (native pointer width).
+  typename Compression::EncodedReference reference_;
 };
 
 // References between objects within the managed heap.
@@ -212,8 +230,9 @@ class MANAGED HeapReference {
   explicit HeapReference(MirrorType* mirror_ptr) REQUIRES_SHARED(Locks::mutator_lock_)
       : reference_(Compression::Compress(mirror_ptr)) {}
 
-  // The encoded reference to a mirror::Object. Atomically updateable.
-  Atomic<uint32_t> reference_;
+  // The encoded reference to a mirror::Object (native pointer width).
+  // Atomically updateable.
+  Atomic<typename Compression::EncodedReference> reference_;
 };
 
 static_assert(sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,

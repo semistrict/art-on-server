@@ -62,17 +62,21 @@ class MANAGED Executable : public AccessibleObject {
 
 
  private:
-  uint8_t has_real_parameter_data_;
-
-  // Padding required for matching alignment with the Java peer.
-  [[maybe_unused]] uint8_t padding_[2];
-
+  // art-host fork (large heap): the field linker (ClassLinker::LinkFieldsHelper)
+  // lays out instance fields reference-first (by dex index), then primitives by
+  // descending size. With native-pointer-width (8-byte) references this is a
+  // gap-free layout, and the packed C++ struct must declare fields in that exact
+  // order to match. Declaring the byte field first (as upstream does for the
+  // 4-byte-reference layout) would put the references at a +3 offset that the
+  // field linker does not use, corrupting reference reads. Hence: references,
+  // then the 64-bit field, then the 32-bit fields, then the byte.
   HeapReference<mirror::Class> declaring_class_;
   HeapReference<mirror::Class> declaring_class_of_overridden_method_;
   HeapReference<mirror::Array> parameters_;
   uint64_t art_method_;
   uint32_t access_flags_;
   uint32_t dex_method_index_;
+  uint8_t has_real_parameter_data_;
 
   template<bool kTransactionActive = false>
   void SetDeclaringClass(ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_) {

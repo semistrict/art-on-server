@@ -52,10 +52,13 @@
 #include "profile/profile_boot_info.h"
 #include "profile/profile_compilation_info.h"
 #include "profile_saver.h"
+#include "interpreter/shadow_frame.h"
 #include "runtime.h"
+#include "runtime_globals.h"
 #include "runtime_options.h"
 #include "small_pattern_matcher.h"
 #include "stack.h"
+#include "stack_reference.h"
 #include "thread-inl.h"
 #include "thread_list.h"
 
@@ -64,6 +67,13 @@ using android::base::unique_fd;
 namespace art HIDDEN {
 namespace jit {
 
+// art-host fork (large heap): OSR is enabled. The OSR vreg transfer in
+// Jit::PrepareForOsr now copies object references at full pointer width (8 bytes) from the
+// interpreter shadow frame into the JITed frame, using the OSR stack map's reference mask to
+// distinguish reference slots from primitives (see PrepareForOsr). Without this, a reference vreg
+// was truncated to its low 32 bits, producing a garbage pointer above 4 GiB (and even at <=4 GiB
+// the 8-byte slot would be left half-uninitialized). Long-running loops now switch from the switch
+// interpreter into compiled code mid-loop.
 static constexpr bool kEnableOnStackReplacement = true;
 
 // JIT compiler
@@ -352,7 +362,10 @@ extern "C" void art_quick_osr_stub(void** stack,
                                    const char* shorty,
                                    Thread* self);
 
-OsrData* Jit::PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs) {
+OsrData* Jit::PrepareForOsr(ArtMethod* method,
+                            uint32_t dex_pc,
+                            uint32_t* vregs,
+                            ShadowFrame* shadow_frame) {
   if (!kEnableOnStackReplacement) {
     return nullptr;
   }
@@ -394,6 +407,17 @@ OsrData* Jit::PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs)
     DexRegisterMap vreg_map = code_info.GetDexRegisterMapOf(stack_map);
     DCHECK_EQ(vreg_map.size(), number_of_vregs);
 
+    // art-host fork (large heap): an object reference is a native pointer-width (8-byte) value,
+    // so it may have non-zero high bits when the heap maps above 4 GiB. The OSR stack mask is the
+    // authoritative source for which compiled-frame slots the compiled code and the GC treat as
+    // references at this PC. For a reference slot we must copy the full 8-byte reference from the
+    // interpreter's References() side-array (via shadow_frame->GetVRegReference), not the truncated
+    // low-32-bit value-slot summary in `vregs`. Mirrors the GC root walk in
+    // Thread::ReferenceMapVisitor (thread.cc) and the deopt vreg transfer in
+    // quick_exception_handler.cc, which read stack-mask references as 8-byte StackReferences at
+    // byte offset bit*kVRegSize.
+    BitMemoryRegion stack_mask = code_info.GetStackMaskOf(stack_map);
+
     size_t frame_size = osr_method->GetFrameSizeInBytes();
 
     // Allocate memory to put shadow frame values. The osr stub will copy that memory to
@@ -428,11 +452,37 @@ OsrData* Jit::PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs)
 
         DCHECK_EQ(location, DexRegisterLocation::Kind::kInStack);
 
-        int32_t vreg_value = vregs[vreg];
         int32_t slot_offset = vreg_map[vreg].GetStackOffsetInBytes();
         DCHECK_LT(slot_offset, static_cast<int32_t>(frame_size));
         DCHECK_GT(slot_offset, 0);
-        (reinterpret_cast<int32_t*>(osr_data->memory))[slot_offset / sizeof(int32_t)] = vreg_value;
+
+        // The stack mask marks a reference at bit slot_offset/kVRegSize (it indexes 4-byte slots),
+        // but the reference stored there is a full pointer-width (8-byte) StackReference. The
+        // compiler reserves two kVRegSize slots per reference (NumberOfSpillSlotsNeeded == 2 in
+        // this fork), so slot_offset..slot_offset+8 is the reference's own space and the 8-byte
+        // write cannot collide with an adjacent vreg.
+        const size_t bit = static_cast<size_t>(slot_offset) / kVRegSize;
+        if (shadow_frame != nullptr &&
+            bit < stack_mask.size_in_bits() &&
+            stack_mask.LoadBit(bit)) {
+          // Reference slot: copy the full 8-byte reference from the interpreter shadow frame. The
+          // buffer is memset to 0, so a null reference is already correct, but we write it anyway
+          // to be explicit. kPoisonReferences is off in this fork, so a StackReference is the raw
+          // 8-byte pointer.
+          //
+          // shadow_frame is null only on the nterp OSR path (NterpHotMethod). nterp is disabled in
+          // this fork (IsNterpSupported() == false) because its arm64 asm truncates references to
+          // 4 bytes, so that path is dead code; if it were ever re-enabled we would keep the
+          // legacy 4-byte transfer below (consistent with nterp's own 4-byte reference storage)
+          // until nterp itself is ported to native-width references.
+          mirror::Object* ref = shadow_frame->GetVRegReference(vreg);
+          reinterpret_cast<StackReference<mirror::Object>*>(
+              reinterpret_cast<uint8_t*>(osr_data->memory) + slot_offset)->Assign(ref);
+        } else {
+          // Primitive slot: keep the 4-byte value-slot copy.
+          int32_t vreg_value = vregs[vreg];
+          (reinterpret_cast<int32_t*>(osr_data->memory))[slot_offset / sizeof(int32_t)] = vreg_value;
+        }
       }
     }
 
@@ -482,7 +532,8 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
   ShadowFrame* shadow_frame = thread->GetManagedStack()->GetTopShadowFrame();
   OsrData* osr_data = jit->PrepareForOsr(method,
                                          dex_pc + dex_pc_offset,
-                                         shadow_frame->GetVRegArgs(0));
+                                         shadow_frame->GetVRegArgs(0),
+                                         shadow_frame);
 
   if (osr_data == nullptr) {
     return false;

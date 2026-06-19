@@ -513,8 +513,11 @@ size_t LiveInterval::NumberOfSpillSlotsNeeded() const {
     }
     return definition->AsVecOperation()->GetVectorNumberOfBytes() / kVRegSize;
   }
-  // Return number of needed spill slots based on type.
-  return (type_ == DataType::Type::kInt64 || type_ == DataType::Type::kFloat64) ? 2 : 1;
+  // Return number of needed spill slots based on type. art-host fork (large heap): this is the
+  // MACHINE byte size of the spill (each slot is kVRegSize=4 bytes), so a native 8-byte reference
+  // needs 2 slots like a long/double -- Is64BitType now includes kReference. (The dex-register map
+  // still gives a reference a single entry; that side keys off Location kind / exact type, not this.)
+  return DataType::Is64BitType(type_) ? 2 : 1;
 }
 
 Location LiveInterval::ToLocation() const {

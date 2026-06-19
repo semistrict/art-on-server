@@ -149,8 +149,23 @@ class DataType {
     return type == Type::kInt32 || type == Type::kInt64;
   }
 
-  static bool Is64BitType(Type type) {
+  // art-host fork (large heap): "wide DEX value" -- occupies TWO consecutive Dalvik vregs (one
+  // dex-register pair / two stack-map dex-register entries). ONLY long and double are wide in dex;
+  // a REFERENCE is ONE dex vreg (move-object) even though it is now an 8-byte machine value. Use
+  // this (NOT Is64BitType) for anything that counts dex vregs, builds dex-register maps /
+  // environments, or invalidates a dex-register pair (e.g. HInstructionBuilder::UpdateLocal). This
+  // is the ORIGINAL Is64BitType semantics, from before native references became 64-bit.
+  static bool IsWideType(Type type) {
     return type == Type::kUint64 || type == Type::kInt64 || type == Type::kFloat64;
+  }
+
+  // art-host fork (large heap): "64-bit MACHINE value" -- lives in a 64-bit machine register (arm64
+  // X not W), an 8-byte spill slot, an 8-byte load/store/parallel-move. With native pointer-width
+  // (uncompressed) references kReference is 8 bytes, so it is 64-bit HERE. Use this for register
+  // width / spill byte size / move + load/store width. For dex-vreg-pair semantics use IsWideType.
+  static bool Is64BitType(Type type) {
+    return type == Type::kReference ||
+           type == Type::kUint64 || type == Type::kInt64 || type == Type::kFloat64;
   }
 
   static bool Is8BitType(Type type) {
@@ -275,7 +290,10 @@ class DataType {
   static const char* PrettyDescriptor(Type type);
 
  private:
-  static constexpr size_t kObjectReferenceSize = 4u;
+  // art-host fork (large heap): native pointer width (uncompressed oops).
+  // DataType::Size(kReference)/SizeShift derive from this, so the JIT/AOT
+  // codegen emits native-width reference loads/stores automatically.
+  static constexpr size_t kObjectReferenceSize = sizeof(uintptr_t);
 };
 std::ostream& operator<<(std::ostream& os, DataType::Type data_type);
 

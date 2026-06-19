@@ -441,7 +441,13 @@ static void FillRootTable(uint8_t* roots_data, const std::vector<Handle<mirror::
   }
   // Store the length of the table at the end. This will allow fetching it from a stack_map
   // pointer.
-  reinterpret_cast<uint32_t*>(roots_data)[length] = length;
+  // art-host fork (large heap): a GcRoot is now 8 bytes (native pointer-width references), so the
+  // length goes AFTER the 8-byte roots -- matching ComputeRootTableSize (sizeof(uint32_t) +
+  // N*sizeof(GcRoot)) and GetNumberOfRoots() reading it at stack_map[-1]. The old
+  // `reinterpret_cast<uint32_t*>(roots_data)[length]` placed it at length*4 bytes, which with
+  // 8-byte roots overwrote the low half of gc_roots[length/2] and corrupted class/string roots in
+  // any method with more than one root.
+  reinterpret_cast<uint32_t*>(gc_roots + length)[0] = length;
 }
 
 bool JitMemoryRegion::CommitData(ArrayRef<const uint8_t> reserved_data,

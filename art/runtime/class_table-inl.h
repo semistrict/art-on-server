@@ -187,7 +187,7 @@ inline bool ClassTable::TableSlot::IsNull() const {
 
 template<ReadBarrierOption kReadBarrierOption>
 inline ObjPtr<mirror::Class> ClassTable::TableSlot::Read() const {
-  const uint32_t before = data_.load(std::memory_order_relaxed);
+  const uintptr_t before = data_.load(std::memory_order_relaxed);
   const ObjPtr<mirror::Class> before_ptr(ExtractPtr(before));
   const ObjPtr<mirror::Class> after_ptr(
       GcRoot<mirror::Class>(before_ptr).Read<kReadBarrierOption>());
@@ -201,7 +201,7 @@ inline ObjPtr<mirror::Class> ClassTable::TableSlot::Read() const {
 
 template<typename Visitor>
 inline void ClassTable::TableSlot::VisitRoot(const Visitor& visitor) const {
-  const uint32_t before = data_.load(std::memory_order_relaxed);
+  const uintptr_t before = data_.load(std::memory_order_relaxed);
   ObjPtr<mirror::Class> before_ptr(ExtractPtr(before));
   GcRoot<mirror::Class> root(before_ptr);
   visitor.VisitRoot(root.AddressWithoutBarrier());
@@ -213,11 +213,11 @@ inline void ClassTable::TableSlot::VisitRoot(const Visitor& visitor) const {
   }
 }
 
-inline ObjPtr<mirror::Class> ClassTable::TableSlot::ExtractPtr(uint32_t data) {
-  return reinterpret_cast<mirror::Class*>(data & ~kHashMask);
+inline ObjPtr<mirror::Class> ClassTable::TableSlot::ExtractPtr(uintptr_t data) {
+  return reinterpret_cast<mirror::Class*>(data & ~static_cast<uintptr_t>(kHashMask));
 }
 
-inline uint32_t ClassTable::TableSlot::Encode(ObjPtr<mirror::Class> klass, uint32_t hash_bits) {
+inline uintptr_t ClassTable::TableSlot::Encode(ObjPtr<mirror::Class> klass, uint32_t hash_bits) {
   DCHECK_LE(hash_bits, kHashMask);
   return reinterpret_cast<uintptr_t>(klass.Ptr()) | hash_bits;
 }
@@ -227,7 +227,7 @@ inline ClassTable::TableSlot::TableSlot(ObjPtr<mirror::Class> klass, uint32_t de
   DCHECK_EQ(descriptor_hash, klass->DescriptorHash());
 }
 
-inline ClassTable::TableSlot::TableSlot(uint32_t ptr, uint32_t descriptor_hash)
+inline ClassTable::TableSlot::TableSlot(uintptr_t ptr, uint32_t descriptor_hash)
     : data_(ptr | MaskHash(descriptor_hash)) {
   DCHECK_ALIGNED(ptr, kObjectAlignment);
 }

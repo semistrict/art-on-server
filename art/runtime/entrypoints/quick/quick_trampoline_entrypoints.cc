@@ -72,6 +72,12 @@ template <typename FrameInfo>
 class QuickArgumentVisitorImpl {
   // Number of bytes for each out register in the caller method's frame.
   static constexpr size_t kBytesStackArgLocation = 4;
+  // art-host fork (large heap): number of out-register stack slots a reference occupies in the
+  // args overlay. With native pointer-width references (kHeapReferenceSize == 8) a reference is
+  // two 4-byte slots, like a long/double; with stock 4-byte references it is one. The invoke stub
+  // lays references out at this width, so the stack-arg cursor must advance by the same amount or
+  // every argument after a reference (including the implicit `this`) is read at the wrong offset.
+  static constexpr size_t kStackSlotsPerReference = kHeapReferenceSize / kBytesStackArgLocation;
   // Frame size in bytes of a callee-save frame for RefsAndArgs.
   static constexpr size_t kQuickCalleeSaveFrame_RefAndArgs_FrameSize =
       RuntimeCalleeSaveFrame::GetFrameSize(CalleeSaveType::kSaveRefsAndArgs);
@@ -250,7 +256,10 @@ class QuickArgumentVisitorImpl {
       cur_type_ = Primitive::kPrimNot;
       is_split_long_or_double_ = false;
       Visit();
-      stack_index_++;
+      // art-host fork (large heap): `this` is a native pointer-width reference and occupies
+      // kStackSlotsPerReference out-register slots in the args overlay (two on a 64-bit-ref host).
+      // It still consumes a single GPR (one X register holds the whole 8-byte reference).
+      stack_index_ += kStackSlotsPerReference;
       if (kNumQuickGprArgs > 0) {
         IncGprIndex();
       }
@@ -259,6 +268,16 @@ class QuickArgumentVisitorImpl {
       cur_type_ = Primitive::GetType(c);
       switch (cur_type_) {
         case Primitive::kPrimNot:
+          // art-host fork (large heap): a reference argument is native pointer width and occupies
+          // kStackSlotsPerReference out-register slots, but a single GPR (X register). Handle it
+          // separately from the 4-byte integral arguments below.
+          is_split_long_or_double_ = false;
+          Visit();
+          stack_index_ += kStackSlotsPerReference;
+          if (gpr_index_ < kNumQuickGprArgs) {
+            IncGprIndex();
+          }
+          break;
         case Primitive::kPrimBoolean:
         case Primitive::kPrimByte:
         case Primitive::kPrimChar:
@@ -2003,7 +2022,11 @@ void BuildGenericJniFrameVisitor::Visit() {
           reinterpret_cast<StackReference<mirror::Object>*>(current_vreg_);
       spill_ref->Assign(obj);
       sm_.AdvancePointer(obj != nullptr ? spill_ref : nullptr);
-      current_vreg_ += 1u;
+      // art-host fork (large heap): a StackReference is native pointer width
+      // (8 bytes) so it occupies two 4-byte vreg slots. Advance by two to keep
+      // adjacent reference spills from overlapping. The GC-side walk in
+      // Thread::...::VisitQuickFrameWithVregCallback uses the identical stride.
+      current_vreg_ += kHeapReferenceSize / sizeof(uint32_t);
       break;
     }
     case Primitive::kPrimFloat:

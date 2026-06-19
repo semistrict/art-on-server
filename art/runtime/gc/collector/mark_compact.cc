@@ -426,28 +426,33 @@ size_t MarkCompact::ComputeInfoMapSize() {
   size_t chunk_info_vec_size = moving_space_size / kOffsetChunkSize;
   size_t nr_moving_pages = DivideByPageSize(moving_space_size);
   size_t nr_non_moving_pages = DivideByPageSize(heap_->GetNonMovingSpace()->Capacity());
-  return chunk_info_vec_size * sizeof(uint32_t) + nr_non_moving_pages * sizeof(ObjReference) +
-         nr_moving_pages * (sizeof(ObjReference) + sizeof(uint32_t) + sizeof(Atomic<uint32_t>));
+  // art-host fork (large heap): chunk_info_vec_ entries are native pointer width
+  // (cumulative post-compact offsets, which may exceed 4 GiB).
+  return chunk_info_vec_size * sizeof(uint64_t) + nr_non_moving_pages * sizeof(ObjReference) +
+         nr_moving_pages * (sizeof(ObjReference) + sizeof(uint32_t) + sizeof(Atomic<uint64_t>));
 }
 
 size_t MarkCompact::InitializeInfoMap(uint8_t* p, size_t moving_space_sz) {
   size_t nr_moving_pages = DivideByPageSize(moving_space_sz);
 
-  chunk_info_vec_ = reinterpret_cast<uint32_t*>(p);
+  chunk_info_vec_ = reinterpret_cast<uint64_t*>(p);
   vector_length_ = moving_space_sz / kOffsetChunkSize;
-  size_t total = vector_length_ * sizeof(uint32_t);
+  size_t total = vector_length_ * sizeof(uint64_t);
 
   first_objs_moving_space_ = reinterpret_cast<ObjReference*>(p + total);
   total += nr_moving_pages * sizeof(ObjReference);
 
-  pre_compact_offset_moving_space_ = reinterpret_cast<uint32_t*>(p + total);
-  total += nr_moving_pages * sizeof(uint32_t);
-
-  moving_pages_status_ = reinterpret_cast<Atomic<uint32_t>*>(p + total);
-  total += nr_moving_pages * sizeof(Atomic<uint32_t>);
+  // art-host fork (large heap): moving_pages_status_ is now Atomic<uint64_t> and needs 8-byte
+  // alignment, so place it (with the other 8-byte arrays) before the 4-byte
+  // pre_compact_offset_moving_space_ array, which now goes last. The total is unchanged.
+  moving_pages_status_ = reinterpret_cast<Atomic<uint64_t>*>(p + total);
+  total += nr_moving_pages * sizeof(Atomic<uint64_t>);
 
   first_objs_non_moving_space_ = reinterpret_cast<ObjReference*>(p + total);
   total += DivideByPageSize(heap_->GetNonMovingSpace()->Capacity()) * sizeof(ObjReference);
+
+  pre_compact_offset_moving_space_ = reinterpret_cast<uint32_t*>(p + total);
+  total += nr_moving_pages * sizeof(uint32_t);
   DCHECK_EQ(total, ComputeInfoMapSize());
   return total;
 }
@@ -1194,7 +1199,9 @@ bool MarkCompact::PrepareForCompaction() {
                                 first_objs_non_moving_space_);
   // Update the vector one past the heap usage as it is required for black
   // allocated objects' post-compact address computation.
-  uint32_t total_bytes;
+  // art-host fork (large heap): native pointer width -- this is the total live
+  // size of the moving space, which may exceed 4 GiB.
+  uint64_t total_bytes;
   if (vector_len < vector_length_) {
     vector_len++;
     total_bytes = 0;
@@ -2311,8 +2318,9 @@ bool MarkCompact::DoPageCompactionWithStateChange(size_t page_idx,
                                                   uint8_t* page,
                                                   bool map_immediately,
                                                   CompactionFn func) {
-  uint32_t expected_state = static_cast<uint8_t>(PageState::kUnprocessed);
-  uint32_t desired_state = static_cast<uint8_t>(map_immediately ? PageState::kProcessingAndMapping :
+  // art-host fork (large heap): native pointer width to match Atomic<uint64_t> moving_pages_status_.
+  uint64_t expected_state = static_cast<uint8_t>(PageState::kUnprocessed);
+  uint64_t desired_state = static_cast<uint8_t>(map_immediately ? PageState::kProcessingAndMapping :
                                                                   PageState::kProcessing);
   // In the concurrent case (kMode != kFallbackMode) we need to ensure that the update
   // to moving_spaces_status_[page_idx] is released before the contents of the page are
@@ -2335,11 +2343,11 @@ bool MarkCompact::DoPageCompactionWithStateChange(size_t page_idx,
         moving_pages_status_[page_idx].store(static_cast<uint8_t>(PageState::kProcessedAndMapped),
                                              std::memory_order_relaxed);
       } else {
-        // Add the src page's index in the status word.
+        // Add the src page's from-space byte offset in the status word.
+        // art-host fork (large heap): native pointer width -- the from-space offset exceeds 4 GiB
+        // once the moving space does (this previously truncated into a uint32_t status word).
         DCHECK(from_space_map_.HasAddress(page));
-        DCHECK_LE(static_cast<size_t>(page - from_space_begin_),
-                  std::numeric_limits<uint32_t>::max());
-        uint32_t store_val = page - from_space_begin_;
+        uint64_t store_val = page - from_space_begin_;
         DCHECK_EQ(store_val & kPageStateMask, 0u);
         store_val |= static_cast<uint8_t>(PageState::kProcessed);
         // Store is sufficient as no other thread would modify the status at this point.
@@ -2670,12 +2678,14 @@ size_t MarkCompact::MapMovingSpacePages(size_t start_idx,
   bool wait_for_unmapped = false;
   while (arr_idx < arr_len) {
     size_t map_count = 0;
-    uint32_t cur_state = moving_pages_status_[arr_idx].load(std::memory_order_acquire);
+    // art-host fork (large heap): the status word and the from-space offset it carries are native
+    // pointer width (the offset exceeds 4 GiB for moving spaces past 4 GiB).
+    uint64_t cur_state = moving_pages_status_[arr_idx].load(std::memory_order_acquire);
     // Find a contiguous range that can be mapped with single ioctl.
-    for (uint32_t i = arr_idx, from_page = cur_state & ~kPageStateMask; i < arr_len;
-         i++, map_count++, from_page += gPageSize) {
-      uint32_t s = moving_pages_status_[i].load(std::memory_order_acquire);
-      uint32_t cur_from_page = s & ~kPageStateMask;
+    size_t from_page = cur_state & ~kPageStateMask;
+    for (size_t i = arr_idx; i < arr_len; i++, map_count++, from_page += gPageSize) {
+      uint64_t s = moving_pages_status_[i].load(std::memory_order_acquire);
+      size_t cur_from_page = s & ~kPageStateMask;
       if (GetPageStateFromWord(s) != PageState::kProcessed || cur_from_page != from_page) {
         break;
       }
@@ -2696,7 +2706,7 @@ size_t MarkCompact::MapMovingSpacePages(size_t start_idx,
         }
       }
     } else {
-      uint32_t from_space_offset = cur_state & ~kPageStateMask;
+      size_t from_space_offset = cur_state & ~kPageStateMask;
       uint8_t* to_space_start = moving_space_begin_ + arr_idx * gPageSize;
       uint8_t* from_space_start = from_space_begin_ + from_space_offset;
       DCHECK_ALIGNED_PARAM(to_space_start, gPageSize);
@@ -3148,16 +3158,19 @@ class MarkCompact::LinearAllocPageUpdater {
   // GC-roots. For example, class-table and intern-table.
   void SingleObjectArena(uint8_t* page_begin, size_t page_size)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    static_assert(sizeof(uint32_t) == sizeof(GcRoot<mirror::Object>));
+    // art-host fork (large heap): GC-roots are native pointer width now, so
+    // read each root as a uintptr_t word. The class-table still tags the low
+    // kObjectAlignment bits, which stay zero in 8-aligned object addresses.
+    static_assert(sizeof(uintptr_t) == sizeof(GcRoot<mirror::Object>));
     DCHECK_ALIGNED(page_begin, kAlignment);
     // Least significant bits are used by class-table.
-    static constexpr uint32_t kMask = kObjectAlignment - 1;
+    static constexpr uintptr_t kMask = kObjectAlignment - 1;
     size_t num_roots = page_size / sizeof(GcRoot<mirror::Object>);
-    uint32_t* root_ptr = reinterpret_cast<uint32_t*>(page_begin);
+    uintptr_t* root_ptr = reinterpret_cast<uintptr_t*>(page_begin);
     for (size_t i = 0; i < num_roots; root_ptr++, i++) {
-      uint32_t word = *root_ptr;
+      uintptr_t word = *root_ptr;
       if (word != 0) {
-        uint32_t lsbs = word & kMask;
+        uintptr_t lsbs = word & kMask;
         word &= ~kMask;
         VisitRootIfNonNull(reinterpret_cast<mirror::CompressedReference<mirror::Object>*>(&word));
         *root_ptr = word | lsbs;
@@ -3451,7 +3464,12 @@ void MarkCompact::CompactionPause() {
   if (uffd_ == kFallbackMode) {
     CompactMovingSpace<kFallbackMode>(nullptr);
 
-    int32_t freed_bytes = black_objs_slide_diff_;
+    // art-host fork (large heap): black_objs_slide_diff_ is the moving-space bytes reclaimed by
+    // sliding compaction (black_allocations_begin_ - post_compact_end_). At a >2 GiB moving space
+    // this exceeds INT32_MAX, so a 32-bit `freed_bytes` would overflow to a negative/garbage value
+    // and underflow num_bytes_allocated_ (heap then reports it is full -> spurious OutOfMemoryError
+    // and the bogus "freed 17179869183GB" GC log). Keep it full width.
+    int64_t freed_bytes = black_objs_slide_diff_;
     bump_pointer_space_->RecordFree(freed_objects_, freed_bytes);
     RecordFree(ObjectBytePair(freed_objects_, freed_bytes));
   } else {
@@ -3649,7 +3667,7 @@ void MarkCompact::ConcurrentlyProcessMovingPage(uint8_t* fault_page,
     size_t end_idx = page_idx + DivideByPageSize(end - fault_page);
     size_t length = 0;
     for (size_t idx = page_idx; idx < end_idx; idx++, length += gPageSize) {
-      uint32_t cur_state = moving_pages_status_[idx].load(std::memory_order_acquire);
+      uint64_t cur_state = moving_pages_status_[idx].load(std::memory_order_acquire);
       if (cur_state != static_cast<uint8_t>(PageState::kUnprocessed)) {
         DCHECK_EQ(cur_state, static_cast<uint8_t>(PageState::kProcessedAndMapped));
         break;
@@ -3665,7 +3683,7 @@ void MarkCompact::ConcurrentlyProcessMovingPage(uint8_t* fault_page,
     return;
   }
 
-  uint32_t raw_state = moving_pages_status_[page_idx].load(std::memory_order_acquire);
+  uint64_t raw_state = moving_pages_status_[page_idx].load(std::memory_order_acquire);
   uint32_t backoff_count = 0;
   PageState state;
   while (true) {
@@ -4137,7 +4155,11 @@ void MarkCompact::UnregisterUffd(uint8_t* start, size_t len) {
 void MarkCompact::CompactionPhase() {
   TimingLogger::ScopedTiming t(__FUNCTION__, GetTimings());
   {
-    int32_t freed_bytes = black_objs_slide_diff_;
+    // art-host fork (large heap): see CompactMovingSpace's fallback path. black_objs_slide_diff_
+    // (moving-space bytes reclaimed by compaction) exceeds INT32_MAX at a >2 GiB moving space, so a
+    // 32-bit `freed_bytes` would overflow negative and underflow num_bytes_allocated_, causing
+    // spurious OOM. Keep it full width.
+    int64_t freed_bytes = black_objs_slide_diff_;
     bump_pointer_space_->RecordFree(freed_objects_, freed_bytes);
     RecordFree(ObjectBytePair(freed_objects_, freed_bytes));
   }

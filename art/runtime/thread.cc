@@ -2809,12 +2809,15 @@ class JniTransitionReferenceVisitor : public StackVisitor {
       uint8_t* sp = reinterpret_cast<uint8_t*>(GetCurrentQuickFrame());
       size_t frame_size = GetCurrentQuickFrameInfo().FrameSizeInBytes();
       uint32_t* current_vreg = reinterpret_cast<uint32_t*>(sp + frame_size + sizeof(ArtMethod*));
+      // art-host fork (large heap): a spilled StackReference is native pointer
+      // width and occupies kHeapReferenceSize/sizeof(uint32_t) vreg slots.
+      constexpr size_t kRefVregs = kHeapReferenceSize / sizeof(uint32_t);
       if (!m->IsStatic()) {
         if (current_vreg == obj_) {
           found_ = true;
           return false;
         }
-        current_vreg += 1u;
+        current_vreg += kRefVregs;
       }
       uint32_t shorty_length;
       const char* shorty = m->GetShorty(&shorty_length);
@@ -2829,7 +2832,8 @@ class JniTransitionReferenceVisitor : public StackVisitor {
               found_ = true;
               return false;
             }
-            FALLTHROUGH_INTENDED;
+            current_vreg += kRefVregs;
+            break;
           default:
             current_vreg += 1u;
             break;
@@ -4303,9 +4307,13 @@ class ReferenceMapVisitor : public StackVisitor {
         }
       };
       const char* shorty = m->GetShorty();
+      // art-host fork (large heap): a spilled StackReference is native pointer
+      // width and occupies kHeapReferenceSize/sizeof(uint32_t) vreg slots. The
+      // spill side (BuildGenericJniFrameVisitor::Visit) uses the same stride.
+      constexpr size_t kRefVregs = kHeapReferenceSize / sizeof(uint32_t);
       if (!m->IsStatic()) {
         visit();
-        current_vreg += 1u;
+        current_vreg += kRefVregs;
       }
       for (shorty += 1u; *shorty != 0; ++shorty) {
         switch (*shorty) {
@@ -4315,7 +4323,8 @@ class ReferenceMapVisitor : public StackVisitor {
             break;
           case 'L':
             visit();
-            FALLTHROUGH_INTENDED;
+            current_vreg += kRefVregs;
+            break;
           default:
             current_vreg += 1u;
             break;
@@ -4340,7 +4349,13 @@ class ReferenceMapVisitor : public StackVisitor {
       BitMemoryRegion stack_mask = code_info.GetStackMaskOf(map);
       for (size_t i = 0; i < stack_mask.size_in_bits(); ++i) {
         if (stack_mask.LoadBit(i)) {
-          StackReference<mirror::Object>* ref_addr = vreg_base + i;
+          // art-host fork (large heap): a StackReference is now 8 bytes (native pointer-width
+          // references), but the stack mask indexes 4-byte (kVRegSize) frame slots -- the producer
+          // marks bit GetSpillSlot()/kVRegSize. So the reference's byte offset is i*kVRegSize, NOT
+          // i*sizeof(StackReference). Index by bytes and read the 8-byte reference there; the
+          // upstream `vreg_base + i` would read at double the offset and mark a garbage root.
+          StackReference<mirror::Object>* ref_addr = reinterpret_cast<StackReference<mirror::Object>*>(
+              reinterpret_cast<uint8_t*>(vreg_base) + i * kVRegSize);
           mirror::Object* ref = ref_addr->AsMirrorPtr();
           if (ref != nullptr) {
             mirror::Object* new_ref = ref;

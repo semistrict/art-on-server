@@ -42,7 +42,8 @@ namespace space {
 
 class MemoryToolLargeObjectMapSpace final : public LargeObjectMapSpace {
  public:
-  explicit MemoryToolLargeObjectMapSpace(const std::string& name) : LargeObjectMapSpace(name) {
+  explicit MemoryToolLargeObjectMapSpace(const std::string& name, bool low_4gb)
+      : LargeObjectMapSpace(name, low_4gb) {
   }
 
   ~MemoryToolLargeObjectMapSpace() override {
@@ -124,14 +125,15 @@ void LargeObjectSpace::CopyLiveToMarked() {
   mark_bitmap_.CopyFrom(&live_bitmap_);
 }
 
-LargeObjectMapSpace::LargeObjectMapSpace(const std::string& name)
-    : LargeObjectSpace(name, nullptr, nullptr, "large object map space lock") {}
+LargeObjectMapSpace::LargeObjectMapSpace(const std::string& name, bool low_4gb)
+    : LargeObjectSpace(name, nullptr, nullptr, "large object map space lock"),
+      low_4gb_(low_4gb) {}
 
-LargeObjectMapSpace* LargeObjectMapSpace::Create(const std::string& name) {
+LargeObjectMapSpace* LargeObjectMapSpace::Create(const std::string& name, bool low_4gb) {
   if (Runtime::Current()->IsRunningOnMemoryTool()) {
-    return new MemoryToolLargeObjectMapSpace(name);
+    return new MemoryToolLargeObjectMapSpace(name, low_4gb);
   } else {
-    return new LargeObjectMapSpace(name);
+    return new LargeObjectMapSpace(name, low_4gb);
   }
 }
 
@@ -145,7 +147,11 @@ mirror::Object* LargeObjectMapSpace::Alloc(Thread* self, size_t num_bytes,
   MemMap mem_map = MemMap::MapAnonymous("large object space allocation",
                                         num_bytes,
                                         PROT_READ | PROT_WRITE,
-                                        /*low_4gb=*/true,
+                                        // art-host fork (large heap): 64-bit references let large
+                                        // objects live above 4 GiB, but they must share the main
+                                        // heap's half of the address space so the mark-compact
+                                        // large-object bitmap covers them (see Create()).
+                                        /*low_4gb=*/low_4gb_,
                                         &error_msg);
   if (UNLIKELY(!mem_map.IsValid())) {
     LOG(WARNING) << "Large object allocation failed: " << error_msg;
@@ -364,7 +370,7 @@ inline bool FreeListSpace::SortByPrevFree::operator()(const AllocationInfo* a,
   return reinterpret_cast<uintptr_t>(a) < reinterpret_cast<uintptr_t>(b);
 }
 
-FreeListSpace* FreeListSpace::Create(const std::string& name, size_t size) {
+FreeListSpace* FreeListSpace::Create(const std::string& name, size_t size, bool low_4gb) {
   CHECK_ALIGNED_PARAM(size, ObjectAlignment());
   DCHECK_LE(gPageSize, ObjectAlignment())
       << "MapAnonymousAligned() should be used if the large-object alignment is larger than the "
@@ -373,7 +379,12 @@ FreeListSpace* FreeListSpace::Create(const std::string& name, size_t size) {
   MemMap mem_map = MemMap::MapAnonymous(name.c_str(),
                                         size,
                                         PROT_READ | PROT_WRITE,
-                                        /*low_4gb=*/true,
+                                        // art-host fork (large heap): 64-bit references let large
+                                        // objects live above 4 GiB, but they must share the main
+                                        // heap's half of the address space so the mark-compact
+                                        // large-object bitmap covers them (see
+                                        // LargeObjectMapSpace::Create).
+                                        /*low_4gb=*/low_4gb,
                                         &error_msg);
   CHECK(mem_map.IsValid()) << "Failed to allocate large object space mem map: " << error_msg;
   return new FreeListSpace(name, std::move(mem_map), mem_map.Begin(), mem_map.End());
@@ -398,6 +409,17 @@ FreeListSpace::FreeListSpace(const std::string& name,
                            &error_msg);
   CHECK(allocation_info_map_.IsValid()) << "Failed to allocate allocation info map" << error_msg;
   allocation_info_ = reinterpret_cast<AllocationInfo*>(allocation_info_map_.Begin());
+  // art-host fork (large heap): the DiscontinuousSpace base constructor created the live/mark
+  // bitmaps covering only the low 4 GiB (heap_begin=nullptr, capacity=4 GiB; see its TODO). With
+  // native pointer-width references this contiguous large-object space can map above 4 GiB, so
+  // re-create the bitmaps over this space's actual map range. Otherwise the mark-compact collector
+  // (MarkZygoteLargeObjects / sweeping via VisitMarkedRange) indexes the bitmap out of bounds for
+  // any large object above 4 GiB and crashes. (The map-based LOS cannot be bounded this way, so
+  // heaps above 4 GiB must use this free-list space.)
+  live_bitmap_ = accounting::LargeObjectBitmap::Create("large live objects", begin, space_capacity);
+  CHECK(live_bitmap_.IsValid());
+  mark_bitmap_ = accounting::LargeObjectBitmap::Create("large marked objects", begin, space_capacity);
+  CHECK(mark_bitmap_.IsValid());
 }
 
 void FreeListSpace::ClampGrowthLimit(size_t new_capacity) {

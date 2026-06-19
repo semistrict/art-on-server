@@ -253,9 +253,11 @@ void ArtInterpreterToCompiledCodeBridge(Thread* self,
   if (jit != nullptr && caller != nullptr) {
     jit->NotifyInterpreterToCompiledCodeTransition(self, caller);
   }
-  method->Invoke(self, shadow_frame->GetVRegArgs(arg_offset),
-                 (shadow_frame->NumberOfVRegs() - arg_offset) * sizeof(uint32_t),
-                 result, method->GetInterfaceMethodIfProxy(kRuntimePointerSize)->GetShorty());
+  // art-host fork (large heap): marshal the arguments through an ArgArray so that
+  // reference arguments reach the invoke stub at native pointer width (8 bytes).
+  // Passing shadow_frame->GetVRegArgs() directly would hand the 4-byte vreg value
+  // region to the stub, truncating any reference above 4 GiB.
+  InvokeMethodFromShadowFrame(self, method, shadow_frame, arg_offset, result);
 }
 
 void SetStringInitValueToAllAliases(ShadowFrame* shadow_frame,

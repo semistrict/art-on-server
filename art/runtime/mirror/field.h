@@ -85,9 +85,13 @@ class MANAGED Field : public AccessibleObject {
   void VisitTarget(ReflectiveValueVisitor* v) REQUIRES(Locks::mutator_lock_);
 
  private:
-  // Padding required for matching alignment with the Java peer.
-  uint8_t padding_[3];
-
+  // art-host fork (large heap): the field linker lays out instance fields
+  // reference-first, then primitives by descending size. With native-pointer-
+  // width (8-byte) references and the 8-aligned AccessibleObject base, that is a
+  // gap-free layout, so the packed C++ struct must declare the references first
+  // with no leading padding (the upstream padding_[3] was for the 4-byte-
+  // reference layout and would push the 8-byte references to an unaligned offset
+  // the field linker does not use, corrupting reference reads).
   HeapReference<mirror::Class> declaring_class_;
   HeapReference<mirror::Class> type_;
   int32_t access_flags_;

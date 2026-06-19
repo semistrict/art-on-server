@@ -374,7 +374,11 @@ static JniCompiledMethod ArtJniCompileMethodInternal(const CompilerOptions& comp
   // Move normal arguments to their locations.
   for (; mr_conv->HasNext(); mr_conv->Next(), main_jni_conv->Next()) {
     DCHECK(main_jni_conv->HasNext());
-    static_assert(kObjectReferenceSize == 4u);
+    // art-host fork (large heap): references are native pointer width; the
+    // managed/JNI calling conventions derive the reference param size from
+    // sizeof(mirror::HeapReference) and MoveArguments uses those sizes, so the
+    // moves below adapt automatically.
+    static_assert(kObjectReferenceSize == sizeof(mirror::HeapReference<mirror::Object>));
     bool is_reference = mr_conv->IsCurrentParamAReference();
     size_t src_size = mr_conv->CurrentParamSize();
     size_t dest_size = main_jni_conv->CurrentParamSize();

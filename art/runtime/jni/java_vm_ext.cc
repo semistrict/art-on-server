@@ -58,6 +58,11 @@ namespace art HIDDEN {
 using android::base::StringAppendF;
 using android::base::StringAppendV;
 
+// art-host fork: lookup over the build-time-generated table of Java_*
+// symbols in the statically linked boot JNI libs (static_jni_symbols.cpp,
+// compiled into dalvikvms only).
+extern "C" __attribute__((weak)) void* art_static_jni_lookup(const char* name);
+
 // Maximum number of global references (must fit in 16 bits).
 static constexpr size_t kGlobalsMax = 51200;
 
@@ -306,6 +311,19 @@ class Libraries {
     }
     if (native_code != nullptr) {
       return native_code;
+    }
+    // art-host fork: fully static binaries (dalvikvms) cannot dlsym; consult
+    // the build-time-generated table of Java_* symbols (weak - absent in
+    // dynamic builds, where it stays null).
+    if (art_static_jni_lookup != nullptr) {
+      void* fn = art_static_jni_lookup(jni_short_name.c_str());
+      if (fn == nullptr) {
+        fn = art_static_jni_lookup(jni_long_name.c_str());
+      }
+      if (fn != nullptr) {
+        VLOG(jni) << "[Found native code for " << jni_long_name << " in the static JNI table]";
+        return fn;
+      }
     }
     if (detail != nullptr) {
       *detail += "No implementation found for ";
@@ -945,12 +963,65 @@ void JavaVMExt::UnloadBootNativeLibraries() {
   libraries_.get()->UnloadBootNativeLibraries(this);
 }
 
+// art-host fork: in fully static binaries (dalvikvms) the boot JNI
+// libraries are linked in and dlopen is unavailable; their JNI_OnLoad
+// entry points are exported under per-library alias names (weak here so
+// dynamic builds are unaffected) and dispatched directly.
+extern "C" __attribute__((weak)) jint JNI_OnLoad_icu_jni(JavaVM*, void*);
+extern "C" __attribute__((weak)) jint JNI_OnLoad_javacore(JavaVM*, void*);
+extern "C" __attribute__((weak)) jint JNI_OnLoad_openjdk(JavaVM*, void*);
+// (conscrypt already exports this alias when built with -DSTATIC_LIB.)
+extern "C" __attribute__((weak)) jint JNI_OnLoad_conscrypt(JavaVM*, void*);
+
+namespace {
+
+struct StaticBootJniLib {
+  const char* name;
+  jint (*on_load)(JavaVM*, void*);
+  bool loaded;
+};
+
+StaticBootJniLib* FindStaticBootJniLib(const std::string& path) {
+  static StaticBootJniLib libs[] = {
+      {"libicu_jni.so", JNI_OnLoad_icu_jni, false},
+      {"libjavacore.so", JNI_OnLoad_javacore, false},
+      {"libopenjdk.so", JNI_OnLoad_openjdk, false},
+      {"libjavacrypto.so", JNI_OnLoad_conscrypt, false},
+  };
+  // System.loadLibrary may hand us an absolute path; match the basename.
+  size_t slash = path.rfind('/');
+  std::string_view name = std::string_view(path).substr(slash == std::string::npos ? 0 : slash + 1);
+  for (StaticBootJniLib& lib : libs) {
+    if (name == lib.name && lib.on_load != nullptr) {
+      return &lib;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
 bool JavaVMExt::LoadNativeLibrary(JNIEnv* env,
                                   const std::string& path,
                                   jobject class_loader,
                                   jclass caller_class,
                                   std::string* error_msg) {
   error_msg->clear();
+
+  // art-host fork: statically linked boot JNI library? Run its JNI_OnLoad
+  // once and skip the dlopen machinery.
+  if (StaticBootJniLib* static_lib = FindStaticBootJniLib(path)) {
+    if (!static_lib->loaded) {
+      static_lib->loaded = true;
+      int version = static_lib->on_load(this, nullptr);
+      if (JavaVMExt::IsBadJniVersion(version)) {
+        *error_msg = android::base::StringPrintf("Bad JNI version returned from JNI_OnLoad in \"%s\": %d",
+                                  path.c_str(), version);
+        return false;
+      }
+    }
+    return true;
+  }
 
   // See if we've already loaded this library.  If we have, and the class loader
   // matches, return successfully without doing anything.

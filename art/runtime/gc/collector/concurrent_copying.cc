@@ -3433,7 +3433,11 @@ mirror::Object* ConcurrentCopying::Copy(Thread* const self,
   to_ref->SetClass(klass);
   const size_t kObjectHeaderSize = sizeof(mirror::Object);
   DCHECK_GE(obj_size, kObjectHeaderSize);
-  static_assert(kObjectHeaderSize == sizeof(mirror::HeapReference<mirror::Class>) +
+  // art-host fork (large heap): the class reference is native pointer width,
+  // so mirror::Object may carry alignment tail padding; the logical header is
+  // the class reference plus the lock word, and the C++ struct is at least
+  // that size (copying the padded struct stays within the object).
+  static_assert(kObjectHeaderSize >= sizeof(mirror::HeapReference<mirror::Class>) +
                     sizeof(LockWord),
                 "Object header size does not match");
   // Memcpy can tear for words since it may do byte copy. It is only safe to do this since the

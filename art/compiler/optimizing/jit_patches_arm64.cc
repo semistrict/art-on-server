@@ -42,13 +42,16 @@ vixl::aarch64::Literal<uint64_t>* JitPatchesARM64::DeduplicateUint64Literal(
 
 static void PatchJitRootUse(uint8_t* code,
                             const uint8_t* roots_data,
-                            vixl::aarch64::Literal<uint32_t>* literal,
+                            vixl::aarch64::Literal<uint64_t>* literal,
                             uint64_t index_in_table) {
   uint32_t literal_offset = literal->GetOffset();
   uintptr_t address =
       reinterpret_cast<uintptr_t>(roots_data) + index_in_table * sizeof(GcRoot<mirror::Object>);
   uint8_t* data = code + literal_offset;
-  reinterpret_cast<uint32_t*>(data)[0] = dchecked_integral_cast<uint32_t>(address);
+  // art-host fork (large heap): roots_data is a full 64-bit host address (mapped above 4 GiB on the
+  // host), so write the whole pointer into a 64-bit literal -- truncating to uint32_t corrupted the
+  // GcRoot slot address and the JITted code faulted dereferencing it.
+  reinterpret_cast<uint64_t*>(data)[0] = address;
 }
 
 void JitPatchesARM64::EmitJitRootPatches(
@@ -57,19 +60,19 @@ void JitPatchesARM64::EmitJitRootPatches(
     const CodeGenerationData& code_generation_data) const {
   for (const auto& entry : jit_string_patches_) {
     const StringReference& string_reference = entry.first;
-    vixl::aarch64::Literal<uint32_t>* table_entry_literal = entry.second;
+    vixl::aarch64::Literal<uint64_t>* table_entry_literal = entry.second;
     uint64_t index_in_table = code_generation_data.GetJitStringRootIndex(string_reference);
     PatchJitRootUse(code, roots_data, table_entry_literal, index_in_table);
   }
   for (const auto& entry : jit_class_patches_) {
     const TypeReference& type_reference = entry.first;
-    vixl::aarch64::Literal<uint32_t>* table_entry_literal = entry.second;
+    vixl::aarch64::Literal<uint64_t>* table_entry_literal = entry.second;
     uint64_t index_in_table = code_generation_data.GetJitClassRootIndex(type_reference);
     PatchJitRootUse(code, roots_data, table_entry_literal, index_in_table);
   }
   for (const auto& entry : jit_method_type_patches_) {
     const ProtoReference& proto_reference = entry.first;
-    vixl::aarch64::Literal<uint32_t>* table_entry_literal = entry.second;
+    vixl::aarch64::Literal<uint64_t>* table_entry_literal = entry.second;
     uint64_t index_in_table = code_generation_data.GetJitMethodTypeRootIndex(proto_reference);
     PatchJitRootUse(code, roots_data, table_entry_literal, index_in_table);
   }
@@ -80,7 +83,10 @@ vixl::aarch64::Literal<uint32_t>* JitPatchesARM64::DeduplicateBootImageAddressLi
   return DeduplicateUint32Literal(dchecked_integral_cast<uint32_t>(address));
 }
 
-vixl::aarch64::Literal<uint32_t>* JitPatchesARM64::DeduplicateJitStringLiteral(
+// art-host fork (large heap): JIT root literals hold the 64-bit host address of a GcRoot slot in
+// roots_data (above 4 GiB on the host), so they are 64-bit (were uint32_t). Loaded into an X
+// register and dereferenced by GenerateGcRootFieldLoad.
+vixl::aarch64::Literal<uint64_t>* JitPatchesARM64::DeduplicateJitStringLiteral(
     const DexFile& dex_file,
     dex::StringIndex string_index,
     Handle<mirror::String> handle,
@@ -89,11 +95,11 @@ vixl::aarch64::Literal<uint32_t>* JitPatchesARM64::DeduplicateJitStringLiteral(
   return jit_string_patches_.GetOrCreate(
       StringReference(&dex_file, string_index),
       [this]() {
-        return GetVIXLAssembler()->CreateLiteralDestroyedWithPool<uint32_t>(/* value= */ 0u);
+        return GetVIXLAssembler()->CreateLiteralDestroyedWithPool<uint64_t>(/* value= */ 0u);
       });
 }
 
-vixl::aarch64::Literal<uint32_t>* JitPatchesARM64::DeduplicateJitClassLiteral(
+vixl::aarch64::Literal<uint64_t>* JitPatchesARM64::DeduplicateJitClassLiteral(
     const DexFile& dex_file,
     dex::TypeIndex type_index,
     Handle<mirror::Class> handle,
@@ -102,11 +108,11 @@ vixl::aarch64::Literal<uint32_t>* JitPatchesARM64::DeduplicateJitClassLiteral(
   return jit_class_patches_.GetOrCreate(
       TypeReference(&dex_file, type_index),
       [this]() {
-        return GetVIXLAssembler()->CreateLiteralDestroyedWithPool<uint32_t>(/* value= */ 0u);
+        return GetVIXLAssembler()->CreateLiteralDestroyedWithPool<uint64_t>(/* value= */ 0u);
       });
 }
 
-vixl::aarch64::Literal<uint32_t>* JitPatchesARM64::DeduplicateJitMethodTypeLiteral(
+vixl::aarch64::Literal<uint64_t>* JitPatchesARM64::DeduplicateJitMethodTypeLiteral(
     const DexFile& dex_file,
     dex::ProtoIndex proto_index,
     Handle<mirror::MethodType> handle,
@@ -115,7 +121,7 @@ vixl::aarch64::Literal<uint32_t>* JitPatchesARM64::DeduplicateJitMethodTypeLiter
   return jit_method_type_patches_.GetOrCreate(
       ProtoReference(&dex_file, proto_index),
       [this]() {
-        return GetVIXLAssembler()->CreateLiteralDestroyedWithPool<uint32_t>(/* value= */ 0u);
+        return GetVIXLAssembler()->CreateLiteralDestroyedWithPool<uint64_t>(/* value= */ 0u);
       });
 }
 

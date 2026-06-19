@@ -1363,6 +1363,16 @@ bool OptimizingCompiler::JitCompile(Thread* self,
   };
 
   if (UNLIKELY(method->IsNative())) {
+    // art-host fork (large heap): the JNI-stub compiler's arm64 calling convention still
+    // has 4-byte-reference assumptions (W-register arg handling in
+    // calling_convention_arm64.cc / jni_macro_assembler), which abort when a reference is
+    // native pointer width. Don't JIT JNI stubs yet; native methods stay on the
+    // generic JNI trampoline (already ported to 8-byte references and correct above
+    // 4 GiB). TODO: port the JNI compiler reference width and re-enable JITed JNI stubs.
+    // (Guarded by the runtime IsNative() call so this is not flagged as unreachable code.)
+    if (method->IsNative()) {
+      return false;
+    }
     // Use GenericJniTrampoline for critical native methods in debuggable runtimes. We don't
     // support calling method entry / exit hooks for critical native methods yet.
     // TODO(mythria): Add support for calling method entry / exit hooks in JITed stubs for critical

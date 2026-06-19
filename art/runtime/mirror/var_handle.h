@@ -213,6 +213,13 @@ class MANAGED VarHandle : public Object {
   HeapReference<mirror::Class> coordinate_type1_;
   HeapReference<mirror::Class> var_type_;
   int32_t access_modes_bit_mask_;
+  // art-host fork (large heap): subclasses (FieldVarHandle::art_field_ etc.) add
+  // a 64-bit field that the field linker 8-aligns. Without this explicit padding
+  // the packed C++ layout lets the subclass reuse this class's tail padding and
+  // place that 8-byte field at an unaligned offset (44 instead of 48), diverging
+  // from the field linker and corrupting the read. Round the instance size up to
+  // the object alignment with explicit (non-reusable) padding.
+  [[maybe_unused]] uint32_t padding_;
 
   friend class VarHandleTest;  // for testing purposes
   friend struct art::VarHandleOffsets;  // for verifying offset information

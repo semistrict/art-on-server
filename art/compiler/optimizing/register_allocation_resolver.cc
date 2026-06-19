@@ -103,6 +103,9 @@ void RegisterAllocationResolver::Resolve(ArrayRef<HInstruction* const> safepoint
         case DataType::Type::kFloat64:
           slot += long_spill_slots;
           FALLTHROUGH_INTENDED;
+        case DataType::Type::kReference:
+          // art-host fork (large heap): a native 8-byte reference spills from the long (8-byte)
+          // pool (see AllocateSpillSlotFor), so its frame offset is accumulated like a long.
         case DataType::Type::kUint64:
         case DataType::Type::kInt64:
           slot += float_spill_slots;
@@ -110,7 +113,6 @@ void RegisterAllocationResolver::Resolve(ArrayRef<HInstruction* const> safepoint
         case DataType::Type::kFloat32:
           slot += int_spill_slots;
           FALLTHROUGH_INTENDED;
-        case DataType::Type::kReference:
         case DataType::Type::kUint32:
         case DataType::Type::kInt32:
         case DataType::Type::kUint16:

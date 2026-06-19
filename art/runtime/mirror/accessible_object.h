@@ -42,6 +42,16 @@ class MANAGED AccessibleObject : public Object {
   // We only use the field indirectly using the FlagOffset() method.
   [[maybe_unused]] uint8_t flag_;
 
+  // art-host fork (large heap): native-pointer-width (8-byte) reference fields
+  // in subclasses (e.g. Executable::declaring_class_) must be 8-aligned, which
+  // the field linker guarantees by rounding this class's instance size up to the
+  // object alignment. Without this explicit padding the packed C++ layout lets a
+  // subclass reuse this class's tail padding and place an 8-byte reference at an
+  // unaligned offset (here 17 instead of 24), diverging from the field linker and
+  // corrupting reference reads. Materialise the rounding as explicit fields so
+  // subclass fields begin 8-aligned and the C++ struct matches the field linker.
+  [[maybe_unused]] uint8_t padding_[sizeof(uintptr_t) - sizeof(uint8_t)];
+
   DISALLOW_IMPLICIT_CONSTRUCTORS(AccessibleObject);
 };
 

@@ -742,7 +742,10 @@ void IntrinsicLocationsBuilderARM64::VisitThreadCurrentThread(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitThreadCurrentThread(HInvoke* invoke) {
-  codegen_->Load(DataType::Type::kReference, WRegisterFrom(invoke->GetLocations()->Out()),
+  // art-host fork (large heap): the peer Thread is a native 8-byte reference; load it at full
+  // width (X) so it is not truncated when the heap maps above 4 GiB.
+  codegen_->Load(DataType::Type::kReference,
+                 RegisterFrom(invoke->GetLocations()->Out(), DataType::Type::kReference),
                  MemOperand(tr, Thread::PeerOffset<kArm64PointerSize>().Int32Value()));
 }
 
@@ -1439,11 +1442,14 @@ static void GenerateCompareAndSet(CodeGeneratorARM64* codegen,
   // from the main path attempt to emit CAS when the marked old value matched `expected`.
   DCHECK_IMPLIES(expected2.IsValid(), type == DataType::Type::kReference);
 
+  // art-host fork (large heap): a reference is a native 8-byte machine value (Is64BitType), so the
+  // CAS operands are X registers for kReference as well as kInt64 (the load/store-exclusive width
+  // is taken from these registers); a W operand would do a 4-byte CAS on an 8-byte slot.
   DCHECK(ptr.IsX());
-  DCHECK_EQ(new_value.IsX(), type == DataType::Type::kInt64);
-  DCHECK_EQ(old_value.IsX(), type == DataType::Type::kInt64);
+  DCHECK_EQ(new_value.IsX(), DataType::Is64BitType(type));
+  DCHECK_EQ(old_value.IsX(), DataType::Is64BitType(type));
   DCHECK(store_result.IsW());
-  DCHECK_EQ(expected.IsX(), type == DataType::Type::kInt64);
+  DCHECK_EQ(expected.IsX(), DataType::Is64BitType(type));
   DCHECK_IMPLIES(expected2.IsValid(), expected2.IsW());
 
   Arm64Assembler* assembler = codegen->GetAssembler();
@@ -2289,8 +2295,12 @@ void IntrinsicCodeGeneratorARM64::VisitStringEquals(HInvoke* invoke) {
   MacroAssembler* masm = GetVIXLAssembler();
   LocationSummary* locations = invoke->GetLocations();
 
-  Register str = WRegisterFrom(locations->InAt(0));
-  Register arg = WRegisterFrom(locations->InAt(1));
+  // art-host fork (large heap): `str` and `arg` are native 8-byte references. Hold them in X
+  // registers so the null check (Cbz) and the reference-equality compare (Cmp) below act on the
+  // full 64-bit reference; a W view would misread a 4 GiB-aligned arg as null and would report two
+  // distinct strings differing only in their high 32 bits as the same reference.
+  Register str = XRegisterFrom(locations->InAt(0));
+  Register arg = XRegisterFrom(locations->InAt(1));
   Register out = XRegisterFrom(locations->Out());
 
   UseScratchRegisterScope scratch_scope(masm);
@@ -2329,13 +2339,15 @@ void IntrinsicCodeGeneratorARM64::VisitStringEquals(HInvoke* invoke) {
     // As the String class is expected to be non-movable, we can read the class
     // field from String.equals' arguments without read barriers.
     AssertNonMovableStringClass();
-    // /* HeapReference<Class> */ temp = str->klass_
-    __ Ldr(temp, MemOperand(str.X(), class_offset));
+    // /* HeapReference<Class> */ temp = str->klass_   (8-byte reference; load/compare full width so
+    // two classes that share their low 32 bits but map to different >4 GiB addresses are not
+    // conflated.)
+    __ Ldr(temp.X(), MemOperand(str.X(), class_offset));
     // /* HeapReference<Class> */ temp1 = arg->klass_
-    __ Ldr(temp1, MemOperand(arg.X(), class_offset));
+    __ Ldr(temp1.X(), MemOperand(arg.X(), class_offset));
     // Also, because we use the previously loaded class references only in the
     // following comparison, we don't need to unpoison them.
-    __ Cmp(temp, temp1);
+    __ Cmp(temp.X(), temp1.X());
     __ B(&return_false, ne);
   }
 
@@ -3496,10 +3508,13 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
         // in ReadBarrierSystemArrayCopySlowPathARM64. Explicitly allocate the register IP1.
         DCHECK(temps.IsAvailable(ip1));
         temps.Exclude(ip1);
-        tmp = ip1.W();
+        // art-host fork (large heap): references are native 8-byte values; the per-element copy
+        // below moves a full reference, so `tmp` must be a 64-bit register or every copied
+        // Object[] element is truncated to 32 bits above 4 GiB.
+        tmp = ip1.X();
       } else {
         temp3 = temps.AcquireW();
-        tmp = temps.AcquireW();
+        tmp = temps.AcquireX();
       }
 
       Register src_curr_addr = temp1.X();
@@ -3530,8 +3545,9 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
         //     } while (src_ptr != end_ptr)
         //   }
 
-        // /* int32_t */ monitor = src->monitor_
-        __ Ldr(tmp, HeapOperand(src.W(), monitor_offset));
+        // /* int32_t */ monitor = src->monitor_   (32-bit field; keep the W view of the now-64-bit
+        // `tmp` so the LSR-32 dependency below adds 0, and so the read does not over-read 8 bytes.)
+        __ Ldr(tmp.W(), HeapOperand(src.W(), monitor_offset));
         // /* LockWord */ lock_word = LockWord(monitor)
         static_assert(sizeof(LockWord) == sizeof(int32_t),
                       "art::LockWord and int32_t have different sizes.");
@@ -3571,7 +3587,7 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
         // Given the numeric representation, it's enough to check the low bit of the rb_state.
         static_assert(ReadBarrier::NonGrayState() == 0, "Expecting non-gray to have value 0");
         static_assert(ReadBarrier::GrayState() == 1, "Expecting gray to have value 1");
-        __ Tbnz(tmp, LockWord::kReadBarrierStateShift, read_barrier_slow_path->GetEntryLabel());
+        __ Tbnz(tmp.W(), LockWord::kReadBarrierStateShift, read_barrier_slow_path->GetEntryLabel());
       }
 
       // Iterate over the arrays and do a raw copy of the objects. We don't need to
@@ -3589,8 +3605,9 @@ void IntrinsicCodeGeneratorARM64::VisitSystemArrayCopy(HInvoke* invoke) {
       }
     }
 
-    // We only need one card marking on the destination array.
-    codegen_->MarkGCCard(dest.W());
+    // We only need one card marking on the destination array. Pass the full-width (X) reference:
+    // MarkGCCard computes object >> kCardShift, which truncates if given a 32-bit (W) object.
+    codegen_->MarkGCCard(dest);
 
     __ Bind(&skip_copy_and_write_barrier);
   }
@@ -3775,9 +3792,14 @@ void IntrinsicCodeGeneratorARM64::VisitReferenceGetReferent(HInvoke* invoke) {
                                                     /*needs_null_check=*/ true,
                                                     /*use_load_acquire=*/ true);
   } else {
-    MemOperand field = HeapOperand(WRegisterFrom(obj), referent_offset);
-    codegen_->LoadAcquire(
-        invoke, DataType::Type::kReference, WRegisterFrom(out), field, /*needs_null_check=*/ true);
+    // art-host fork (large heap): the referent is a native 8-byte reference; load it at full width
+    // (X) so it is not truncated when the heap maps above 4 GiB.
+    MemOperand field = HeapOperand(RegisterFrom(obj, DataType::Type::kReference), referent_offset);
+    codegen_->LoadAcquire(invoke,
+                          DataType::Type::kReference,
+                          RegisterFrom(out, DataType::Type::kReference),
+                          field,
+                          /*needs_null_check=*/ true);
     codegen_->MaybeGenerateReadBarrierSlow(invoke, out, out, obj, referent_offset);
   }
   __ Bind(slow_path->GetExitLabel());
@@ -3792,10 +3814,13 @@ void IntrinsicCodeGeneratorARM64::VisitReferenceRefersTo(HInvoke* invoke) {
   MacroAssembler* masm = codegen_->GetVIXLAssembler();
   UseScratchRegisterScope temps(masm);
 
-  Register obj = WRegisterFrom(locations->InAt(0));
-  Register other = WRegisterFrom(locations->InAt(1));
+  // art-host fork (large heap): the referent and the comparand are native 8-byte references, so
+  // load and compare them at full width (X); a W view compares only the low 32 bits and would
+  // report distinct objects (differing only above 4 GiB) as equal. `out` is a 32-bit boolean.
+  Register obj = RegisterFrom(locations->InAt(0), DataType::Type::kReference);
+  Register other = RegisterFrom(locations->InAt(1), DataType::Type::kReference);
   Register out = WRegisterFrom(locations->Out());
-  Register tmp = temps.AcquireW();
+  Register tmp = temps.AcquireX();
 
   uint32_t referent_offset = mirror::Reference::ReferentOffset().Uint32Value();
   uint32_t monitor_offset = mirror::Object::MonitorOffset().Int32Value();
@@ -3822,15 +3847,17 @@ void IntrinsicCodeGeneratorARM64::VisitReferenceRefersTo(HInvoke* invoke) {
     // For correct memory visibility, we need a barrier before loading the lock word.
     codegen_->GenerateMemoryBarrier(MemBarrierKind::kLoadAny);
 
-    // Load the lockword and check if it is a forwarding address.
+    // Load the lockword and check if it is a forwarding address. (Baker read barriers are not used
+    // by the CMC collector on this host, so this block is dead; keep the lockword arithmetic at
+    // 32-bit width on the W view of the now-64-bit `tmp`/`other` so it still compiles.)
     static_assert(LockWord::kStateShift == 30u);
     static_assert(LockWord::kStateForwardingAddress == 3u);
-    __ Ldr(tmp, HeapOperand(tmp, monitor_offset));
-    __ Cmp(tmp, Operand(0xc0000000));
+    __ Ldr(tmp.W(), HeapOperand(tmp, monitor_offset));
+    __ Cmp(tmp.W(), Operand(0xc0000000));
     __ B(&calculate_result, lo);   // ZF clear if taken.
 
     // Extract the forwarding address and compare with `other`.
-    __ Cmp(other, Operand(tmp, LSL, LockWord::kForwardingAddressShift));
+    __ Cmp(other.W(), Operand(tmp.W(), LSL, LockWord::kForwardingAddressShift));
 
     __ Bind(&calculate_result);
   }
@@ -4585,20 +4612,22 @@ static void GenerateSubTypeObjectCheckNoReadBarrier(CodeGeneratorARM64* codegen,
 
   vixl::aarch64::Label success;
   if (object_can_be_null) {
-    __ Cbz(object, &success);
+    __ Cbz(object.X(), &success);
   }
 
   UseScratchRegisterScope temps(masm);
-  Register temp = temps.AcquireW();
+  // art-host fork (large heap): `object`, its class and the superclass chain are native 8-byte
+  // references; load and compare them at full width (X). `type` is an X register at the call sites.
+  Register temp = temps.AcquireX();
 
-  __ Ldr(temp, HeapOperand(object, class_offset.Int32Value()));
-  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+  __ Ldr(temp, HeapOperand(object.X(), class_offset.Int32Value()));
+  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp.W());
   vixl::aarch64::Label loop;
   __ Bind(&loop);
   __ Cmp(type, temp);
   __ B(&success, eq);
   __ Ldr(temp, HeapOperand(temp, super_class_offset.Int32Value()));
-  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp.W());
   __ Cbz(temp, slow_path->GetEntryLabel());
   __ B(&loop);
   __ Bind(&success);
@@ -4623,15 +4652,19 @@ static void GenerateVarHandleAccessModeAndVarTypeChecks(HInvoke* invoke,
   const MemberOffset primitive_type_offset = mirror::Class::PrimitiveTypeOffset();
 
   UseScratchRegisterScope temps(masm);
-  Register var_type_no_rb = temps.AcquireW();
+  // art-host fork (large heap): VarHandle.varType is a native 8-byte reference; load it at full
+  // width (X) so it is not truncated above 4 GiB. With 8-byte references varType and the adjacent
+  // accessModesBitMask are 8 (not 4) bytes apart, so they can no longer be loaded with one W-pair
+  // LDP -- load them separately.
+  Register var_type_no_rb = temps.AcquireX();
   Register temp2 = temps.AcquireW();
 
   // Check that the operation is permitted and the primitive type of varhandle.varType.
   // We do not need a read barrier when loading a reference only for loading constant
-  // primitive field through the reference. Use LDP to load the fields together.
-  DCHECK_EQ(var_type_offset.Int32Value() + 4, access_mode_bit_mask_offset.Int32Value());
-  __ Ldp(var_type_no_rb, temp2, HeapOperand(varhandle, var_type_offset.Int32Value()));
-  codegen->GetAssembler()->MaybeUnpoisonHeapReference(var_type_no_rb);
+  // primitive field through the reference.
+  __ Ldr(var_type_no_rb, HeapOperand(varhandle, var_type_offset.Int32Value()));
+  codegen->GetAssembler()->MaybeUnpoisonHeapReference(var_type_no_rb.W());
+  __ Ldr(temp2, HeapOperand(varhandle, access_mode_bit_mask_offset.Int32Value()));
   __ Tbz(temp2, static_cast<uint32_t>(access_mode), slow_path->GetEntryLabel());
   __ Ldrh(temp2, HeapOperand(var_type_no_rb, primitive_type_offset.Int32Value()));
   if (primitive_type == Primitive::kPrimNot) {
@@ -4655,7 +4688,8 @@ static void GenerateVarHandleAccessModeAndVarTypeChecks(HInvoke* invoke,
       HInstruction* arg = invoke->InputAt(arg_index);
       DCHECK_EQ(arg->GetType(), DataType::Type::kReference);
       if (!arg->IsNullConstant()) {
-        Register arg_reg = WRegisterFrom(invoke->GetLocations()->InAt(arg_index));
+        // art-host fork (large heap): the reference argument is a native 8-byte value (X register).
+        Register arg_reg = XRegisterFrom(invoke->GetLocations()->InAt(arg_index));
         GenerateSubTypeObjectCheckNoReadBarrier(codegen, slow_path, arg_reg, var_type_no_rb);
       }
     }
@@ -4671,7 +4705,9 @@ static void GenerateVarHandleStaticFieldCheck(HInvoke* invoke,
   const MemberOffset coordinate_type0_offset = mirror::VarHandle::CoordinateType0Offset();
 
   UseScratchRegisterScope temps(masm);
-  Register temp = temps.AcquireW();
+  // art-host fork (large heap): coordinateType0 is a native 8-byte reference; load and null-check it
+  // at full width (X) so a 4 GiB-aligned reference is not misread as null.
+  Register temp = temps.AcquireX();
 
   // Check that the VarHandle references a static field by checking that coordinateType0 == null.
   // Do not emit read barrier (or unpoison the reference) for comparing to null.
@@ -4697,16 +4733,19 @@ static void GenerateVarHandleInstanceFieldChecks(HInvoke* invoke,
 
   if (!optimizations.GetUseKnownImageVarHandle()) {
     UseScratchRegisterScope temps(masm);
-    Register temp = temps.AcquireW();
+    // art-host fork (large heap): coordinateType0 is a native 8-byte reference; load it at full
+    // width (X). With 8-byte references coordinateType0/coordinateType1 are 8 (not 4) bytes apart,
+    // so they can no longer be loaded with one W-pair LDP -- load them separately.
+    Register temp = temps.AcquireX();
     Register temp2 = temps.AcquireW();
 
     // Check that the VarHandle references an instance field by checking that
     // coordinateType1 == null. coordinateType0 should not be null, but this is handled by the
     // type compatibility check with the source object's type, which will fail for null.
-    DCHECK_EQ(coordinate_type0_offset.Int32Value() + 4, coordinate_type1_offset.Int32Value());
-    __ Ldp(temp, temp2, HeapOperand(varhandle, coordinate_type0_offset.Int32Value()));
-    codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+    __ Ldr(temp, HeapOperand(varhandle, coordinate_type0_offset.Int32Value()));
+    codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp.W());
     // No need for read barrier or unpoisoning of coordinateType1 for comparison with null.
+    __ Ldr(temp2, HeapOperand(varhandle, coordinate_type1_offset.Int32Value()));
     __ Cbnz(temp2, slow_path->GetEntryLabel());
 
     // Check that the object has the correct type.
@@ -4742,16 +4781,20 @@ static void GenerateVarHandleArrayChecks(HInvoke* invoke,
   }
 
   UseScratchRegisterScope temps(masm);
-  Register temp = temps.AcquireW();
-  Register temp2 = temps.AcquireW();
+  // art-host fork (large heap): coordinateType0 / the array class / its component type are native
+  // 8-byte references; load and compare them at full width (X). With 8-byte references
+  // coordinateType0/coordinateType1 are 8 (not 4) bytes apart, so they can no longer be loaded with
+  // one W-pair LDP -- load them separately. Only the primitive type (16-bit) stays W.
+  Register temp = temps.AcquireX();
+  Register temp2 = temps.AcquireX();
 
   // Check that the VarHandle references an array, byte array view or ByteBuffer by checking
   // that coordinateType1 != null. If that's true, coordinateType1 shall be int.class and
   // coordinateType0 shall not be null but we do not explicitly verify that.
-  DCHECK_EQ(coordinate_type0_offset.Int32Value() + 4, coordinate_type1_offset.Int32Value());
-  __ Ldp(temp, temp2, HeapOperand(varhandle, coordinate_type0_offset.Int32Value()));
-  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp);
+  __ Ldr(temp, HeapOperand(varhandle, coordinate_type0_offset.Int32Value()));
+  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp.W());
   // No need for read barrier or unpoisoning of coordinateType1 for comparison with null.
+  __ Ldr(temp2, HeapOperand(varhandle, coordinate_type1_offset.Int32Value()));
   __ Cbz(temp2, slow_path->GetEntryLabel());
 
   // Check object class against componentType0.
@@ -4764,8 +4807,8 @@ static void GenerateVarHandleArrayChecks(HInvoke* invoke,
   // We do this check without read barrier, so there can be false negatives which we
   // defer to the slow path. There shall be no false negatives for array classes in the
   // boot image (including Object[] and primitive arrays) because they are non-movable.
-  __ Ldr(temp2, HeapOperand(object, class_offset.Int32Value()));
-  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp2);
+  __ Ldr(temp2, HeapOperand(object.X(), class_offset.Int32Value()));
+  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp2.W());
   __ Cmp(temp, temp2);
   __ B(slow_path->GetEntryLabel(), ne);
 
@@ -4773,11 +4816,11 @@ static void GenerateVarHandleArrayChecks(HInvoke* invoke,
   // for loading constant reference fields (or chains of them) for comparison with null,
   // nor for finally loading a constant primitive field (primitive type) below.
   __ Ldr(temp2, HeapOperand(temp, component_type_offset.Int32Value()));
-  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp2);
+  codegen->GetAssembler()->MaybeUnpoisonHeapReference(temp2.W());
   __ Cbz(temp2, slow_path->GetEntryLabel());
 
-  // Check that the array component type matches the primitive type.
-  __ Ldrh(temp2, HeapOperand(temp2, primitive_type_offset.Int32Value()));
+  // Check that the array component type matches the primitive type (16-bit field; keep W view).
+  __ Ldrh(temp2.W(), HeapOperand(temp2, primitive_type_offset.Int32Value()));
   if (primitive_type == Primitive::kPrimNot) {
     static_assert(Primitive::kPrimNot == 0);
     __ Cbnz(temp2, slow_path->GetEntryLabel());
@@ -5334,9 +5377,11 @@ static void GenerateVarHandleCompareAndSetOrExchange(HInvoke* invoke,
 
   // This needs to be before the temp registers, as MarkGCCard also uses VIXL temps.
   if (CodeGenerator::StoreNeedsWriteBarrier(value_type, invoke->InputAt(new_value_index))) {
-    // Mark card for object assuming new value is stored.
+    // Mark card for object assuming new value is stored. art-host fork (large heap): pass the full
+    // 8-byte (X) reference -- MaybeMarkGCCard null-checks the value with Cbz, and a W view would
+    // misread a 4 GiB-aligned reference as null and skip the card (a missed write barrier).
     bool new_value_can_be_null = true;  // TODO: Worth finding out this information?
-    codegen->MaybeMarkGCCard(target.object, new_value.W(), new_value_can_be_null);
+    codegen->MaybeMarkGCCard(target.object, new_value.X(), new_value_can_be_null);
   }
 
   // Reuse the `offset` temporary for the pointer to the target location,
@@ -5392,7 +5437,7 @@ static void GenerateVarHandleCompareAndSetOrExchange(HInvoke* invoke,
   Register store_result;
   if (return_success) {
     // Use the output register for both old value and exclusive store result.
-    old_value = (cas_type == DataType::Type::kInt64) ? out.X() : out.W();
+    old_value = DataType::Is64BitType(cas_type) ? out.X() : out.W();
     store_result = out.W();
   } else if (DataType::IsFloatingPointType(value_type)) {
     // We need two temporary registers but we have already used scratch registers for
@@ -5412,7 +5457,7 @@ static void GenerateVarHandleCompareAndSetOrExchange(HInvoke* invoke,
     DCHECK(!store_result.Is(tmp_ptr));
   } else {
     // Use the output register for the old value.
-    old_value = (cas_type == DataType::Type::kInt64) ? out.X() : out.W();
+    old_value = DataType::Is64BitType(cas_type) ? out.X() : out.W();
     // Use scratch register for the store result, except when we have used up
     // scratch registers for byte-swapped `expected` and `new_value`.
     // In that case, we have allocated a normal temporary.

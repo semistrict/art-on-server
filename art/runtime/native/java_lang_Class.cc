@@ -958,8 +958,13 @@ static jobject Class_newInstance(JNIEnv* env, jobject javaThis) {
   }
   // Invoke the constructor.
   JValue result;
-  uint32_t args[1] = { static_cast<uint32_t>(reinterpret_cast<uintptr_t>(receiver.Get())) };
-  constructor->Invoke(soa.Self(), args, sizeof(args), &result, "V");
+  // art-host fork (large heap): the receiver is a native pointer-width (8-byte) reference.
+  // ArtMethod::Invoke reads it as an 8-byte StackReference from args[0], so the slot must be
+  // pointer-sized. Truncating it to uint32_t (the stock 4-byte compressed-ref width) drops the
+  // high half of any receiver above 4 GiB and reads out of bounds for the missing word, producing
+  // a garbage `this` (the crash hit via Class.newInstance() -> sun.nio.fs provider <init>).
+  uintptr_t args[1] = { reinterpret_cast<uintptr_t>(receiver.Get()) };
+  constructor->Invoke(soa.Self(), reinterpret_cast<uint32_t*>(args), sizeof(args), &result, "V");
   if (UNLIKELY(soa.Self()->IsExceptionPending())) {
     return nullptr;
   }

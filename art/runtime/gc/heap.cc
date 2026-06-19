@@ -571,6 +571,80 @@ Heap::Heap(size_t initial_size,
 
   std::string error_str;
   MemMap non_moving_space_mem_map;
+  // art-host fork (large heap): the card table covers [min space Begin, max space
+  // Limit) over the continuous spaces (see the card-table setup below). With native
+  // pointer-width references the heap maps anywhere in the 64-bit address space, and
+  // MemMap::MapAnonymous treats a requested address only as a hint -- so two
+  // independent maps (the non-moving space and the main/region space) can land
+  // arbitrarily far apart. A gap between them inflates the card table without bound:
+  // a stray high main-space mapping once made the card table demand ~256 GiB and
+  // abort at startup, non-deterministically (whether the kernel honoured the hint).
+  // When we are not carving spaces out of a boot-image reservation, reserve one
+  // contiguous region up front and carve every continuous space out of it. Wherever
+  // the reservation lands, the spaces stay virtually adjacent and the card table
+  // stays bounded (~non-moving + main capacity), regardless of the kernel's hint
+  // handling. This also subsumes the "TODO: Place bump-pointer spaces somewhere to
+  // minimize size of card table" below for the no-image case.
+  // CC reserves twice the capacity for evacuation; the moving collectors (including
+  // CMC) use one main space, two when a SemiSpace backup is configured. Add slack for
+  // the region-space alignment trim.
+  const bool needs_main_space_2 = support_homogeneous_space_compaction ||
+      background_collector_type_ == kCollectorTypeSS ||
+      foreground_collector_type_ == kCollectorTypeSS;
+  const size_t main_space_reservation = (foreground_collector_type_ == kCollectorTypeCC)
+      ? 2 * capacity_
+      : capacity_ * (needs_main_space_2 ? 2 : 1);
+  const size_t contiguous_reservation_size = RoundUp(non_moving_space_capacity, gPageSize) +
+      main_space_reservation + 2 * space::RegionSpace::kRegionSize;
+  // art-host fork (always-high heap): object references are full machine-word native
+  // pointers (DataType::Is64BitType(kReference) is true; OSR/deopt/GC all handle 8-byte
+  // refs), so the heap no longer has to live under 4 GiB and we want it NOT to. Placing
+  // the heap high regardless of -Xmx means every object reference always has its high
+  // bits set, giving one uniform 64-bit pointer code path with no small-heap "below
+  // 4 GiB" special case -- and it makes even small-heap test runs exercise the 64-bit
+  // paths where pointer-truncation bugs would otherwise hide. So the normal host runtime
+  // heap is always placed high (low_4gb=false). The only configurations that still
+  // require low placement are the ones that explicitly demand a low fixed base above:
+  // the CC collector (needs a contiguous 2 * Xmx region anchored low) and the
+  // deterministic AOT compiler (kCollectorTypeMS + IsAotCompiler). The boot-image
+  // carve-out path uses heap_reservation instead of this reservation and is unaffected.
+  // This single decision drives BOTH the contiguous reservation below AND the
+  // large-object space: the mark-compact collector indexes large objects through a
+  // bitmap sized for the heap range, so the LOS must sit on the same side of the 4 GiB
+  // line as the main heap.
+  const bool place_heap_below_4gb =
+      foreground_collector_type_ == kCollectorTypeCC ||
+      (foreground_collector_type_ == kCollectorTypeMS && Runtime::Current()->IsAotCompiler());
+  MemMap contiguous_heap_reservation;
+  if (separate_non_moving_space && !heap_reservation.IsValid()) {
+    // Over-reserving address space is free: PROT_NONE commits nothing and the unused
+    // tail is released when this reservation is destroyed at the end of the constructor.
+    // When a caller demanded a specific base (CC / deterministic AOT set request_begin
+    // to a low fixed address), honour it. Otherwise, for the always-high host runtime
+    // path, let the kernel choose the base (nullptr) so arm64 returns a high (>4 GiB)
+    // address rather than the low kPreferredAllocSpaceBegin -- the latter would let a
+    // small heap map low and defeat the always-high placement.
+    uint8_t* reservation_begin =
+        (request_begin != nullptr) ? request_begin
+                                   : (place_heap_below_4gb ? kPreferredAllocSpaceBegin : nullptr);
+    while (true) {
+      contiguous_heap_reservation = MemMap::MapAnonymous("heap address-space reservation",
+                                                         reservation_begin,
+                                                         contiguous_reservation_size,
+                                                         PROT_NONE,
+                                                         /*low_4gb=*/ place_heap_below_4gb,
+                                                         /*reuse=*/ false,
+                                                         /*reservation=*/ nullptr,
+                                                         &error_str);
+      if (contiguous_heap_reservation.IsValid() || reservation_begin == nullptr) {
+        break;
+      }
+      reservation_begin = nullptr;  // Retry letting the kernel choose the base.
+    }
+    CHECK(contiguous_heap_reservation.IsValid())
+        << "Failed to reserve contiguous heap address space ("
+        << PrettySize(contiguous_reservation_size) << "): " << error_str;
+  }
   if (separate_non_moving_space) {
     ScopedTrace trace2("Create separate non moving space");
     // If we are the zygote, the non moving space becomes the zygote space when we run
@@ -583,6 +657,14 @@ Heap::Heap(size_t initial_size,
     if (heap_reservation.IsValid()) {
       non_moving_space_mem_map = heap_reservation.RemapAtEnd(
           heap_reservation.Begin(), space_name, PROT_READ | PROT_WRITE, &error_str);
+    } else if (contiguous_heap_reservation.IsValid()) {
+      // Carve the non-moving space out of the front of the contiguous reservation.
+      non_moving_space_mem_map = MemMap::MapAnonymous(space_name,
+                                                      non_moving_space_capacity,
+                                                      PROT_READ | PROT_WRITE,
+                                                      /*low_4gb=*/ false,
+                                                      &contiguous_heap_reservation,
+                                                      &error_str);
     } else {
       non_moving_space_mem_map = MapAnonymousPreferredAddress(
           space_name, request_begin, non_moving_space_capacity, &error_str);
@@ -597,7 +679,16 @@ Heap::Heap(size_t initial_size,
   // Attempt to create 2 mem maps at or after the requested begin.
   if (foreground_collector_type_ != kCollectorTypeCC) {
     ScopedTrace trace2("Create main mem map");
-    if (separate_non_moving_space || !is_zygote) {
+    if (contiguous_heap_reservation.IsValid()) {
+      // Carve the main space out of the contiguous reservation, immediately after
+      // the non-moving space, so the card table covering both stays bounded.
+      main_mem_map_1 = MemMap::MapAnonymous(kMemMapSpaceName[0],
+                                            capacity_,
+                                            PROT_READ | PROT_WRITE,
+                                            /*low_4gb=*/ false,
+                                            &contiguous_heap_reservation,
+                                            &error_str);
+    } else if (separate_non_moving_space || !is_zygote) {
       main_mem_map_1 = MapAnonymousPreferredAddress(
           kMemMapSpaceName[0], request_begin, capacity_, &error_str);
     } else {
@@ -622,8 +713,17 @@ Heap::Heap(size_t initial_size,
       background_collector_type_ == kCollectorTypeSS ||
       foreground_collector_type_ == kCollectorTypeSS) {
     ScopedTrace trace2("Create main mem map 2");
-    main_mem_map_2 = MapAnonymousPreferredAddress(
-        kMemMapSpaceName[1], main_mem_map_1.End(), capacity_, &error_str);
+    if (contiguous_heap_reservation.IsValid()) {
+      main_mem_map_2 = MemMap::MapAnonymous(kMemMapSpaceName[1],
+                                            capacity_,
+                                            PROT_READ | PROT_WRITE,
+                                            /*low_4gb=*/ false,
+                                            &contiguous_heap_reservation,
+                                            &error_str);
+    } else {
+      main_mem_map_2 = MapAnonymousPreferredAddress(
+          kMemMapSpaceName[1], main_mem_map_1.End(), capacity_, &error_str);
+    }
     CHECK(main_mem_map_2.IsValid()) << error_str;
   }
 
@@ -650,8 +750,14 @@ Heap::Heap(size_t initial_size,
   if (foreground_collector_type_ == kCollectorTypeCC) {
     CHECK(separate_non_moving_space);
     // Reserve twice the capacity, to allow evacuating every region for explicit GCs.
-    MemMap region_space_mem_map =
-        space::RegionSpace::CreateMemMap(kRegionSpaceName, capacity_ * 2, request_begin);
+    // When we built a contiguous reservation, carve the region space out of it so it
+    // stays adjacent to the non-moving space (bounded card table); otherwise fall back
+    // to the requested-address hint.
+    MemMap region_space_mem_map = space::RegionSpace::CreateMemMap(
+        kRegionSpaceName,
+        capacity_ * 2,
+        request_begin,
+        contiguous_heap_reservation.IsValid() ? &contiguous_heap_reservation : nullptr);
     CHECK(region_space_mem_map.IsValid()) << "No region space mem map";
     region_space_ = space::RegionSpace::Create(
         kRegionSpaceName, std::move(region_space_mem_map), use_generational_gc_);
@@ -696,12 +802,25 @@ Heap::Heap(size_t initial_size,
   }
   CHECK(non_moving_space_ != nullptr);
   CHECK(!non_moving_space_->CanMoveObjects());
+  // art-host fork (always-high heap): pick a large-object space that works for the heap's
+  // placement. The map-based LOS mmaps each large object wherever the kernel puts it, so above
+  // 4 GiB the objects scatter past the large-object mark bitmap (the mark-compact collector then
+  // indexes it out of bounds and crashes). The free-list LOS is a single contiguous map with a
+  // bitmap bounded to its own range, so it is correct above 4 GiB. Since the normal host runtime
+  // heap is now always placed high (place_heap_below_4gb is false unless CC / deterministic AOT
+  // forces low), use the free-list LOS for it. The map-based LOS is kept only for the low paths,
+  // where it fits under 4 GiB alongside the main space.
+  if (!place_heap_below_4gb && large_object_space_type == space::LargeObjectSpaceType::kMap) {
+    large_object_space_type = space::LargeObjectSpaceType::kFreeList;
+  }
   // Allocate the large object space.
   if (large_object_space_type == space::LargeObjectSpaceType::kFreeList) {
-    large_object_space_ = space::FreeListSpace::Create("free list large object space", capacity_);
+    large_object_space_ = space::FreeListSpace::Create(
+        "free list large object space", capacity_, place_heap_below_4gb);
     CHECK(large_object_space_ != nullptr) << "Failed to create large object space";
   } else if (large_object_space_type == space::LargeObjectSpaceType::kMap) {
-    large_object_space_ = space::LargeObjectMapSpace::Create("mem map large object space");
+    large_object_space_ = space::LargeObjectMapSpace::Create(
+        "mem map large object space", place_heap_below_4gb);
     CHECK(large_object_space_ != nullptr) << "Failed to create large object space";
   } else {
     // Disable the large object space by making the cutoff excessively large.
@@ -730,8 +849,30 @@ Heap::Heap(size_t initial_size,
   // Start at 4 KB, we can be sure there are no spaces mapped this low since the address range is
   // reserved by the kernel.
   static constexpr size_t kMinHeapAddress = 4 * KB;
-  card_table_.reset(accounting::CardTable::Create(reinterpret_cast<uint8_t*>(kMinHeapAddress),
-                                                  4 * GB - kMinHeapAddress));
+  // art-host fork (large heap): with low_4gb dropped the continuous spaces map
+  // above 4 GiB, so a fixed [4 KiB, 4 GiB) card table no longer covers them.
+  // Cover the actual span of the continuous spaces created so far (musl places
+  // consecutive anonymous mappings adjacently, so this span is bounded). The
+  // map-based large-object space holds primitive/large arrays that are scanned
+  // directly, not via the card table. Fall back to the historical low range if
+  // no spaces exist yet (e.g. degenerate configs).
+  uint8_t* card_begin = reinterpret_cast<uint8_t*>(kMinHeapAddress);
+  uint8_t* card_end = reinterpret_cast<uint8_t*>(4 * GB);
+  {
+    uint8_t* lo = reinterpret_cast<uint8_t*>(std::numeric_limits<uintptr_t>::max());
+    uint8_t* hi = nullptr;
+    for (const auto& space : continuous_spaces_) {
+      lo = std::min(lo, space->Begin());
+      hi = std::max(hi, space->Limit());
+    }
+    if (hi != nullptr && reinterpret_cast<uintptr_t>(hi) > 4 * GB) {
+      // Round outwards so the covered range comfortably brackets every space.
+      card_begin = AlignDown(lo, accounting::CardTable::kCardSize);
+      card_end = AlignUp(hi, accounting::CardTable::kCardSize);
+    }
+  }
+  card_table_.reset(accounting::CardTable::Create(
+      card_begin, static_cast<size_t>(card_end - card_begin)));
   CHECK(card_table_.get() != nullptr) << "Failed to create card table";
   if (foreground_collector_type_ == kCollectorTypeCC && kUseTableLookupReadBarrier) {
     rb_table_.reset(new accounting::ReadBarrierTable());
@@ -887,7 +1028,10 @@ MemMap Heap::MapAnonymousPreferredAddress(const char* name,
                                       request_begin,
                                       capacity,
                                       PROT_READ | PROT_WRITE,
-                                      /*low_4gb=*/ true,
+                                      // art-host fork (large heap): native pointer-width references
+                                      // can address the whole VA space, so the heap need not live in
+                                      // the low 4 GiB. Mapping high also lets -Xmx exceed 4 GiB.
+                                      /*low_4gb=*/ false,
                                       /*reuse=*/ false,
                                       /*reservation=*/ nullptr,
                                       out_error_str);

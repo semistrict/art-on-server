@@ -3444,7 +3444,10 @@ void IntrinsicCodeGeneratorX86_64::HandleValueOf(HInvoke* invoke,
     // If the value is within the bounds, load the boxed value directly from the array.
     DCHECK_NE(out.AsRegister(), argument.AsRegister());
     codegen_->LoadBootImageAddress(argument, info.array_data_boot_image_reference);
-    static_assert((1u << TIMES_4) == sizeof(mirror::HeapReference<mirror::Object>),
+    // art-host fork (large heap): references are native pointer width; this
+    // x86-64 boot-image IntegerCache intrinsic is inactive on the arm64 host
+    // SDK. TODO(largeheap): widen TIMES_4 -> TIMES_8 for x86-64 large-heap.
+    static_assert((1u << TIMES_4) == sizeof(uint32_t),
                   "Check heap reference size.");
     __ movl(out, Address(argument, out, TIMES_4, 0));
     __ MaybeUnpoisonHeapReference(out);

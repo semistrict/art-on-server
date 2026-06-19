@@ -719,8 +719,8 @@ class ReadBarrierForHeapReferenceSlowPathARM64 : public SlowPathCodeARM64 {
         // 2^26 - 1 (that is, 2^28 - 4 bytes).
         __ Lsl(index_reg, index_reg, DataType::SizeShift(type));
         static_assert(
-            sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
-            "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
+            sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,
+            "art::mirror::HeapReference<art::mirror::Object> size mismatch.");
         __ Add(index_reg, index_reg, Operand(offset_));
       } else {
         // In the case of the following intrinsics `index_` is not shifted by a scale factor of 2
@@ -968,6 +968,13 @@ Location InvokeDexCallingConventionVisitorARM64::GetNextLocation(DataType::Type 
     next_location = LocationFrom(calling_convention.GetRegisterAt(gp_index_++));
   } else {
     size_t stack_offset = calling_convention.GetStackOffsetOf(stack_index_);
+    // art-host fork (large heap): Is64BitType -- a stack-passed argument occupies as many
+    // kVRegSize out-register slots as its MACHINE width. A native 8-byte reference is 64-bit here
+    // (Is64BitType(kReference)==true), so it takes a DoubleStackSlot (8 bytes, two slots), exactly
+    // like a long/double; only 4-byte integral/float args take a single StackSlot. This MUST match
+    // the runtime invoke-stub / QuickArgumentVisitor layout, which advances the stack-arg cursor by
+    // kStackSlotsPerReference (== kHeapReferenceSize / 4 == 2) for a reference. Reference args
+    // passed in registers get their 64-bit X width from RegisterFrom, not from this predicate.
     next_location = DataType::Is64BitType(type) ? Location::DoubleStackSlot(stack_offset)
                                                 : Location::StackSlot(stack_offset);
   }
@@ -1615,7 +1622,9 @@ void CodeGeneratorARM64::AddLocationAsTemp(Location location, LocationSummary* l
 void CodeGeneratorARM64::MaybeMarkGCCard(Register object, Register value, bool emit_null_check) {
   vixl::aarch64::Label done;
   if (emit_null_check) {
-    __ Cbz(value, &done);
+    // art-host fork (large heap): null-check the full 8-byte reference. A W view would misread a
+    // 4 GiB-aligned reference (low 32 bits zero) as null and skip the card -> missed write barrier.
+    __ Cbz(value.X(), &done);
   }
   MarkGCCard(object);
   if (emit_null_check) {
@@ -1626,11 +1635,16 @@ void CodeGeneratorARM64::MaybeMarkGCCard(Register object, Register value, bool e
 void CodeGeneratorARM64::MarkGCCard(Register object) {
   UseScratchRegisterScope temps(GetVIXLAssembler());
   Register card = temps.AcquireX();
-  Register temp = temps.AcquireW();  // Index within the CardTable - 32bit.
+  // art-host fork (large heap): object references are native 8-byte values and the heap can map
+  // above 4 GiB, so `object >> kCardShift` does not fit in 32 bits. Compute the card-table index
+  // in a 64-bit register; a W register would truncate the index and mark (or fault on) the wrong
+  // card above 4 GiB.
+  Register temp = temps.AcquireX();  // Index within the CardTable - 64-bit.
   // Load the address of the card table into `card`.
   __ Ldr(card, MemOperand(tr, Thread::CardTableOffset<kArm64PointerSize>().Int32Value()));
-  // Calculate the offset (in the card table) of the card corresponding to `object`.
-  __ Lsr(temp, object, gc::accounting::CardTable::kCardShift);
+  // Calculate the offset (in the card table) of the card corresponding to `object`. Use the full
+  // 8-byte (X) view of `object`: a W view truncates the high address bits of a >4 GiB reference.
+  __ Lsr(temp, object.X(), gc::accounting::CardTable::kCardShift);
   // Write the `art::gc::accounting::CardTable::kCardDirty` value into the
   // `object`'s card.
   //
@@ -1644,22 +1658,24 @@ void CodeGeneratorARM64::MarkGCCard(Register object) {
   // This dual use of the value in register `card` (1. to calculate the location
   // of the card to mark; and 2. to load the `kCardDirty` value) saves a load
   // (no need to explicitly load `kCardDirty` as an immediate value).
-  __ Strb(card, MemOperand(card, temp.X()));
+  __ Strb(card, MemOperand(card, temp));
 }
 
 void CodeGeneratorARM64::CheckGCCardIsValid(Register object) {
   UseScratchRegisterScope temps(GetVIXLAssembler());
   Register card = temps.AcquireX();
-  Register temp = temps.AcquireW();  // Index within the CardTable - 32bit.
+  // art-host fork (large heap): compute the card-table index in a 64-bit register; see MarkGCCard.
+  Register temp = temps.AcquireX();  // Index within the CardTable - 64-bit.
   vixl::aarch64::Label done;
   // Load the address of the card table into `card`.
   __ Ldr(card, MemOperand(tr, Thread::CardTableOffset<kArm64PointerSize>().Int32Value()));
-  // Calculate the offset (in the card table) of the card corresponding to `object`.
-  __ Lsr(temp, object, gc::accounting::CardTable::kCardShift);
+  // Calculate the offset (in the card table) of the card corresponding to `object` (full 8-byte
+  // view of `object`; a W view truncates a >4 GiB reference).
+  __ Lsr(temp, object.X(), gc::accounting::CardTable::kCardShift);
   // assert (!clean || !self->is_gc_marking)
-  __ Ldrb(temp, MemOperand(card, temp.X()));
+  __ Ldrb(temp.W(), MemOperand(card, temp));
   static_assert(gc::accounting::CardTable::kCardClean == 0);
-  __ Cbnz(temp, &done);
+  __ Cbnz(temp.W(), &done);
   __ Cbz(mr, &done);
   __ Unreachable();
   __ Bind(&done);
@@ -2228,11 +2244,15 @@ void CodeGeneratorARM64::GenerateMemoryBarrier(MemBarrierKind kind) {
 }
 
 bool CodeGeneratorARM64::CanUseImplicitSuspendCheck() const {
-  // Use implicit suspend checks if requested in compiler options unless there are SIMD
-  // instructions in the graph. The implicit suspend check saves all FP registers as
-  // 64-bit (in line with the calling convention) but SIMD instructions can use 128-bit
-  // registers, so they need to be saved in an explicit slow path.
-  return GetCompilerOptions().GetImplicitSuspendChecks() && !GetGraph()->HasSIMD();
+  // art-host fork (large heap): the implicit suspend check loads through the dedicated
+  // kImplicitSuspendCheckRegister (x21), which must hold the thread's suspend-trigger pointer for
+  // the whole run. On this host (musl) port that register is not reliably maintained across the
+  // quick trampolines, so the `ldr x21, [x21]` faults on a stale x21 (not recognised by the
+  // SuspensionHandler) instead of polling the suspend flag -- crashing JITed methods that have a
+  // suspend check (e.g. autoboxing through Integer.valueOf). Use EXPLICIT suspend checks (a thread-
+  // flag test, no dedicated register) until the host trampolines maintain x21; explicit checks are
+  // fully correct and only marginally larger.
+  return false;
 }
 
 void InstructionCodeGeneratorARM64::GenerateSuspendCheck(HSuspendCheck* instruction,
@@ -2976,7 +2996,7 @@ void InstructionCodeGeneratorARM64::VisitArrayGet(HArrayGet* instruction) {
 
     if (type == DataType::Type::kReference) {
       static_assert(
-          sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
+          sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,
           "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
       Location obj_loc = locations->InAt(0);
       if (index.IsConstant()) {
@@ -4477,8 +4497,11 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
 
       // Fast-path without read barriers.
       UseScratchRegisterScope temps(GetVIXLAssembler());
-      Register temp = temps.AcquireW();
-      Register temp2 = temps.AcquireW();
+      // art-host fork (large heap): the IfTable base pointer and the interface-class entries are
+      // native 8-byte references, so iterate/compare them with 64-bit registers. Only the IfTable
+      // length and the boolean result (`out`) are 32-bit. Using W views truncates above 4 GiB.
+      Register temp = temps.AcquireX();
+      Register temp2 = temps.AcquireX();
       // /* HeapReference<Class> */ temp = obj->klass_
       __ Ldr(temp, HeapOperand(obj, class_offset));
       GetAssembler()->MaybeUnpoisonHeapReference(temp);
@@ -4497,7 +4520,7 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
       __ Add(temp, temp, 2 * kHeapReferenceSize);
       __ Sub(out, out, 2);
       // Compare the classes and continue the loop if they do not match.
-      __ Cmp(cls, temp2);
+      __ Cmp(cls.X(), temp2);
       __ B(ne, &loop);
       __ Mov(out, 1);
       if (zero.IsLinked()) {
@@ -4751,19 +4774,25 @@ void InstructionCodeGeneratorARM64::VisitCheckCast(HCheckCast* instruction) {
                                        iftable_offset,
                                        maybe_temp2_loc,
                                        kWithoutReadBarrier);
+      // art-host fork (large heap): object references are native 8-byte values, so the IfTable
+      // base pointer and the interface-class entries must be iterated and compared with 64-bit
+      // registers; only the IfTable length is a 32-bit field. Using W views here truncates the
+      // pointer/refs above 4 GiB and corrupts the scan.
+      Register iftable_ptr = temp.X();
+      Register iface_cls = XRegisterFrom(maybe_temp3_loc);
       // Load the size of the `IfTable`. The `Class::iftable_` is never null.
-      __ Ldr(WRegisterFrom(maybe_temp2_loc), HeapOperand(temp.W(), array_length_offset));
+      __ Ldr(WRegisterFrom(maybe_temp2_loc), HeapOperand(iftable_ptr, array_length_offset));
       // Loop through the iftable and check if any class matches.
       vixl::aarch64::Label start_loop;
       __ Bind(&start_loop);
       __ Cbz(WRegisterFrom(maybe_temp2_loc), type_check_slow_path->GetEntryLabel());
-      __ Ldr(WRegisterFrom(maybe_temp3_loc), HeapOperand(temp.W(), object_array_data_offset));
-      GetAssembler()->MaybeUnpoisonHeapReference(WRegisterFrom(maybe_temp3_loc));
+      __ Ldr(iface_cls, HeapOperand(iftable_ptr, object_array_data_offset));
+      GetAssembler()->MaybeUnpoisonHeapReference(iface_cls);
       // Go to next interface.
-      __ Add(temp, temp, 2 * kHeapReferenceSize);
+      __ Add(iftable_ptr, iftable_ptr, 2 * kHeapReferenceSize);
       __ Sub(WRegisterFrom(maybe_temp2_loc), WRegisterFrom(maybe_temp2_loc), 2);
       // Compare the classes and continue the loop if they do not match.
-      __ Cmp(cls, WRegisterFrom(maybe_temp3_loc));
+      __ Cmp(cls.X(), iface_cls);
       __ B(ne, &start_loop);
       break;
     }
@@ -4842,9 +4871,11 @@ void CodeGeneratorARM64::MaybeGenerateInlineCacheCheck(HInstruction* instruction
       uint64_t address = reinterpret_cast64<uint64_t>(cache);
       vixl::aarch64::Label done;
       __ Mov(x8, address);
-      __ Ldr(w9, MemOperand(x8, InlineCache::ClassesOffset().Int32Value()));
+      // art-host fork (large heap): InlineCache::classes_ is an 8-byte GcRoot<Class>; compare the
+      // full 8-byte class so the monomorphic fast path is correct for classes above 4 GiB.
+      __ Ldr(x9, MemOperand(x8, InlineCache::ClassesOffset().Int32Value()));
       // Fast path for a monomorphic cache.
-      __ Cmp(klass.W(), w9);
+      __ Cmp(klass, x9);
       __ B(eq, &done);
       InvokeRuntime(kQuickUpdateInlineCache, instruction);
       __ Bind(&done);
@@ -4866,18 +4897,21 @@ void InstructionCodeGeneratorARM64::VisitInvokeInterface(HInvokeInterface* invok
   Offset entry_point = ArtMethod::EntryPointFromQuickCompiledCodeOffset(kArm64PointerSize);
 
   // Ensure that between load and MaybeRecordImplicitNullCheck there are no pools emitted.
+  // art-host fork (large heap): the receiver and its klass_ are native 8-byte references, so load
+  // them at full width (X). Using W truncated the class above 4 GiB (classes live in the high
+  // non-moving space when the heap maps high) and corrupted the IMT/vtable dispatch.
   if (receiver.IsStackSlot()) {
-    __ Ldr(temp.W(), StackOperandFrom(receiver));
+    __ Ldr(temp, StackOperandFrom(receiver));
     {
       EmissionCheckScope guard(GetVIXLAssembler(), kMaxMacroInstructionSizeInBytes);
       // /* HeapReference<Class> */ temp = temp->klass_
-      __ Ldr(temp.W(), HeapOperand(temp.W(), class_offset));
+      __ Ldr(temp, HeapOperand(temp, class_offset));
       codegen_->MaybeRecordImplicitNullCheck(invoke);
     }
   } else {
     EmissionCheckScope guard(GetVIXLAssembler(), kMaxMacroInstructionSizeInBytes);
     // /* HeapReference<Class> */ temp = receiver->klass_
-    __ Ldr(temp.W(), HeapOperandFrom(receiver, class_offset));
+    __ Ldr(temp, HeapOperandFrom(receiver, class_offset));
     codegen_->MaybeRecordImplicitNullCheck(invoke);
   }
 
@@ -4888,7 +4922,7 @@ void InstructionCodeGeneratorARM64::VisitInvokeInterface(HInvokeInterface* invok
   // concurrent copying collector keeps the from-space memory
   // intact/accessible until the end of the marking phase (the
   // concurrent copying collector may not in the future).
-  GetAssembler()->MaybeUnpoisonHeapReference(temp.W());
+  GetAssembler()->MaybeUnpoisonHeapReference(temp);
 
   // If we're compiling baseline, update the inline cache.
   codegen_->MaybeGenerateInlineCacheCheck(invoke, temp);
@@ -5182,7 +5216,8 @@ void CodeGeneratorARM64::GenerateVirtualCall(
     // Ensure that between load and MaybeRecordImplicitNullCheck there are no pools emitted.
     EmissionCheckScope guard(GetVIXLAssembler(), kMaxMacroInstructionSizeInBytes);
     // /* HeapReference<Class> */ temp = receiver->klass_
-    __ Ldr(temp.W(), HeapOperandFrom(LocationFrom(receiver), class_offset));
+    // art-host fork (large heap): load the 8-byte class (W truncated it above 4 GiB).
+    __ Ldr(temp, HeapOperandFrom(LocationFrom(receiver), class_offset));
     MaybeRecordImplicitNullCheck(invoke);
   }
   // Instead of simply (possibly) unpoisoning `temp` here, we should
@@ -5192,7 +5227,7 @@ void CodeGeneratorARM64::GenerateVirtualCall(
   // concurrent copying collector keeps the from-space memory
   // intact/accessible until the end of the marking phase (the
   // concurrent copying collector may not in the future).
-  GetAssembler()->MaybeUnpoisonHeapReference(temp.W());
+  GetAssembler()->MaybeUnpoisonHeapReference(temp);
 
   // If we're compiling baseline, update the inline cache.
   MaybeGenerateInlineCacheCheck(invoke, temp);
@@ -7061,6 +7096,11 @@ void CodeGeneratorARM64::GenerateGcRootFieldLoad(
   } else {
     // Plain GC root load with no read barrier.
     // /* GcRoot<mirror::Object> */ root = *(obj + offset)
+    // art-host fork (large heap): a GcRoot is a mirror::CompressedReference whose EncodedReference is
+    // now uintptr_t (8 bytes, native pointer width), so it holds a full 64-bit class/string pointer.
+    // root_reg is an X register; load the whole 8-byte root. (This requires the JIT root table and
+    // inline caches to be laid out at 8-byte stride -- see FillRootTable and
+    // art_quick_update_inline_cache.)
     if (fixup_label == nullptr) {
       __ Ldr(root_reg, MemOperand(obj, offset));
     } else {
@@ -7194,7 +7234,7 @@ void CodeGeneratorARM64::GenerateArrayLoadWithBakerReadBarrier(HArrayGet* instru
   DCHECK(EmitBakerReadBarrier());
 
   static_assert(
-      sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
+      sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,
       "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
   size_t scale_factor = DataType::SizeShift(DataType::Type::kReference);
 

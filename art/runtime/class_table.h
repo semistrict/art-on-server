@@ -58,14 +58,16 @@ class ClassTable {
     explicit TableSlot(ObjPtr<mirror::Class> klass);
 
     TableSlot(ObjPtr<mirror::Class> klass, uint32_t descriptor_hash);
-    TableSlot(uint32_t ptr, uint32_t descriptor_hash);
+    // art-host fork (large heap): the packed class-pointer word is native
+    // pointer width so it can hold a 64-bit class reference.
+    TableSlot(uintptr_t ptr, uint32_t descriptor_hash);
 
     TableSlot& operator=(const TableSlot& copy) {
       data_.store(copy.data_.load(std::memory_order_relaxed), std::memory_order_relaxed);
       return *this;
     }
 
-    uint32_t Data() const {
+    uintptr_t Data() const {
       return data_.load(std::memory_order_relaxed);
     }
 
@@ -75,16 +77,16 @@ class ClassTable {
       return MaskHash(data_.load(std::memory_order_relaxed));
     }
 
-    uint32_t NonHashData() const {
+    uintptr_t NonHashData() const {
       return RemoveHash(Data());
     }
 
-    static uint32_t RemoveHash(uint32_t hash) {
-      return hash & ~kHashMask;
+    static uintptr_t RemoveHash(uintptr_t hash) {
+      return hash & ~static_cast<uintptr_t>(kHashMask);
     }
 
-    static uint32_t MaskHash(uint32_t hash) {
-      return hash & kHashMask;
+    static uint32_t MaskHash(uintptr_t hash) {
+      return static_cast<uint32_t>(hash & kHashMask);
     }
 
     bool MaskedHashEquals(uint32_t other) const {
@@ -103,14 +105,15 @@ class ClassTable {
 
    private:
     // Extract a raw pointer from an address.
-    static ObjPtr<mirror::Class> ExtractPtr(uint32_t data)
+    static ObjPtr<mirror::Class> ExtractPtr(uintptr_t data)
         REQUIRES_SHARED(Locks::mutator_lock_);
 
-    static uint32_t Encode(ObjPtr<mirror::Class> klass, uint32_t hash_bits)
+    static uintptr_t Encode(ObjPtr<mirror::Class> klass, uint32_t hash_bits)
         REQUIRES_SHARED(Locks::mutator_lock_);
 
     // Data contains the class pointer GcRoot as well as the low bits of the descriptor hash.
-    mutable Atomic<uint32_t> data_;
+    // art-host fork (large heap): native pointer width to hold a 64-bit class reference.
+    mutable Atomic<uintptr_t> data_;
     static constexpr uint32_t kHashMask = kObjectAlignment - 1;
   };
 

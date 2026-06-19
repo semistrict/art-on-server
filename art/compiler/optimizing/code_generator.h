@@ -203,9 +203,34 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
 
   size_t GetStackSlotOfParameter(HParameterValue* parameter) const {
     // Note that this follows the current calling convention.
+    //
+    // art-host fork (large heap): the home slot of an incoming parameter in the caller-set-up args
+    // region is `pointer_size + (machine-slot index) * kVRegSize`, where each preceding parameter
+    // reserves as many kVRegSize slots as its MACHINE width: a long/double or a native 8-byte
+    // reference takes two slots (Is64BitType), everything else one. This is the SAME accounting the
+    // calling-convention visitor's `stack_index_` and the runtime QuickArgumentVisitor use.
+    //
+    // We cannot use `parameter->GetIndex()` here: that is the dex-vreg ordinal (a reference counts
+    // as ONE dex vreg even though it now occupies two machine slots), so it would under-count the
+    // offset by one slot for every preceding reference and overlap adjacent references. Instead we
+    // replay the calling convention over the parameters in order, so the offset is consistent BY
+    // CONSTRUCTION with GetNextLocation/VisitParameterValue.
+    size_t machine_slot = 0u;
+    for (HInstructionIterator it(GetGraph()->GetEntryBlock()->GetInstructions());
+         !it.Done();
+         it.Advance()) {
+      HInstruction* current = it.Current();
+      if (!current->IsParameterValue()) {
+        continue;
+      }
+      if (current == parameter) {
+        break;
+      }
+      machine_slot += DataType::Is64BitType(current->GetType()) ? 2u : 1u;
+    }
     return GetFrameSize()
         + static_cast<size_t>(InstructionSetPointerSize(GetInstructionSet()))  // Art method
-        + parameter->GetIndex() * kVRegSize;
+        + machine_slot * kVRegSize;
   }
 
   virtual void Initialize() = 0;

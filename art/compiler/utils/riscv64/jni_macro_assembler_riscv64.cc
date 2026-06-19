@@ -244,16 +244,20 @@ void Riscv64JNIMacroAssembler::LoadGcRootWithoutReadBarrier(ManagedRegister m_de
                                                             MemberOffset offs) {
   Riscv64ManagedRegister base = m_base.AsRiscv64();
   Riscv64ManagedRegister dest = m_dest.AsRiscv64();
-  static_assert(sizeof(uint32_t) == sizeof(GcRoot<mirror::Object>));
+  // art-host fork (large heap): riscv64 codegen is not used on the arm64 host
+  // SDK. TODO(largeheap): the Loadwu below must become Ld for 8-byte refs.
+  static_assert(kHeapReferenceSize == sizeof(GcRoot<mirror::Object>));
   __ Loadwu(dest.AsXRegister(), base.AsXRegister(), offs.Int32Value());
 }
 
 void Riscv64JNIMacroAssembler::LoadStackReference(ManagedRegister m_dest, FrameOffset offs) {
   // `StackReference<>` and `GcRoot<>` have the same underlying representation, namely
   // `CompressedReference<>`. And `StackReference<>` does not need a read barrier.
-  static_assert(sizeof(uint32_t) == sizeof(mirror::CompressedReference<mirror::Object>));
-  static_assert(sizeof(uint32_t) == sizeof(StackReference<mirror::Object>));
-  static_assert(sizeof(uint32_t) == sizeof(GcRoot<mirror::Object>));
+  static_assert(kHeapReferenceSize == sizeof(mirror::CompressedReference<mirror::Object>));
+  static_assert(kHeapReferenceSize == sizeof(StackReference<mirror::Object>));
+  // art-host fork (large heap): riscv64 codegen is not used on the arm64 host
+  // SDK. TODO(largeheap): the Loadwu below must become Ld for 8-byte refs.
+  static_assert(kHeapReferenceSize == sizeof(GcRoot<mirror::Object>));
   LoadGcRootWithoutReadBarrier(
       m_dest, Riscv64ManagedRegister::FromXRegister(SP), MemberOffset(offs.Int32Value()));
 }

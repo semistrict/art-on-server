@@ -84,3 +84,20 @@ art_cc_library {
         "com.android.art.debug",
     ],
 }
+
+// art-host fork: static variant for the fully static host dalvikvm
+// (dalvikvms). JVM_* and art symbols resolve from the statically linked
+// libart at final link.
+art_cc_library_static {
+    name: "libopenjdkjvm_static",
+    defaults: ["libopenjdkjvm_defaults"],
+    visibility: ["//art/dalvikvm"],
+    device_supported: false,
+    host_supported: true,
+    header_libs: [
+        "libart_headers",
+        "art_libartbase_headers",
+        "libdexfile_all_headers",
+    ],
+    static_libs: ["libbase"],
+}

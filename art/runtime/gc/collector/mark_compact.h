@@ -235,7 +235,10 @@ class MarkCompact final : public GarbageCollector {
 
  private:
   using ObjReference = mirror::CompressedReference<mirror::Object>;
-  static constexpr uint32_t kPageStateMask = (1 << BitSizeOf<uint8_t>()) - 1;
+  // art-host fork (large heap): size_t so that ~kPageStateMask is a full 64-bit mask -- the page
+  // status word packs the page state in its low byte and the from-space BYTE offset (which exceeds
+  // 4 GiB for moving spaces past 4 GiB) in the upper bits.
+  static constexpr size_t kPageStateMask = (1u << BitSizeOf<uint8_t>()) - 1;
   // Number of bits (live-words) covered by a single chunk-info (below)
   // entry/word.
   // TODO: Since popcount is performed usomg SIMD instructions, we should
@@ -609,7 +612,7 @@ class MarkCompact final : public GarbageCollector {
 
   bool IsValidFd(int fd) const { return fd >= 0; }
 
-  PageState GetPageStateFromWord(uint32_t page_word) {
+  PageState GetPageStateFromWord(uint64_t page_word) {
     return static_cast<PageState>(static_cast<uint8_t>(page_word));
   }
 
@@ -824,7 +827,9 @@ class MarkCompact final : public GarbageCollector {
   // least-significant byte. kProcessed entries also contain the from-space
   // offset of the page which contains the compacted contents of the ith
   // to-space page.
-  Atomic<uint32_t>* moving_pages_status_;
+  // art-host fork (large heap): native pointer width. The status word packs the 8-bit page state
+  // with the from-space byte offset, which exceeds 4 GiB once the moving space does.
+  Atomic<uint64_t>* moving_pages_status_;
   // For pages before black allocations, pre_compact_offset_moving_space_[i]
   // holds offset within the space from where the objects need to be copied in
   // the ith post-compact page.
@@ -911,7 +916,13 @@ class MarkCompact final : public GarbageCollector {
   // copying.
   // chunk_info_vec_ holds live bytes for chunks during marking phase. After
   // marking we perform an exclusive scan to compute offset for every chunk.
-  uint32_t* chunk_info_vec_;
+  // art-host fork (large heap): the post-scan values are CUMULATIVE post-compact
+  // offsets into the moving space, so they must be native pointer width -- a
+  // moving space with more than 4 GiB of live data overflows a uint32_t and the
+  // compaction then computes truncated (wrong) post-compact addresses (the GC
+  // aborts at the post_compact_end_ check). The per-chunk live-byte values stored
+  // before the scan are tiny (<= kOffsetChunkSize); only the vector widens.
+  uint64_t* chunk_info_vec_;
   // moving-space's end pointer at the marking pause. All allocations beyond
   // this will be considered black in the current GC cycle. Aligned up to page
   // size.

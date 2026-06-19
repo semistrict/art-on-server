@@ -250,8 +250,13 @@ void RegisterAllocatorLinearScan::ProcessInstruction(HInstruction* instruction) 
     // Update the `reserved_out_slots_` for invokes that make a call, including intrinsics
     // that make the call only on the slow-path. Same for the `HStringBuilderAppend`.
     if (instruction->IsInvoke()) {
+      // art-host fork (large heap): size the outgoing-argument region by the MACHINE width of the
+      // arguments. A stack-passed reference argument is a 64-bit DoubleStackSlot (two machine
+      // slots), so using the dex `outs_size` (GetNumberOfOutVRegs(), which counts a reference as
+      // one vreg) under-sizes the region and lets a marshalled reference overflow into the spill
+      // slots, corrupting reference spill slots and crashing the GC. See GetNumberOfOutMachineVRegs.
       reserved_out_slots_ = std::max<size_t>(
-          reserved_out_slots_, instruction->AsInvoke()->GetNumberOfOutVRegs());
+          reserved_out_slots_, instruction->AsInvoke()->GetNumberOfOutMachineVRegs());
     } else if (instruction->IsStringBuilderAppend()) {
       reserved_out_slots_ = std::max<size_t>(
           reserved_out_slots_, instruction->AsStringBuilderAppend()->GetNumberOfOutVRegs());
@@ -1252,13 +1257,16 @@ void RegisterAllocatorLinearScan::AllocateSpillSlotFor(LiveInterval* interval) {
     case DataType::Type::kFloat64:
       spill_slots = &double_spill_slots_;
       break;
+    case DataType::Type::kReference:
+      // art-host fork (large heap): a native 8-byte reference needs an 8-byte (2-slot) spill, like a
+      // long, so it spills from the long pool and gets a DoubleStackSlot (NumberOfSpillSlotsNeeded
+      // returns 2 for kReference). It is still ONE dex vreg; the dex-register map side is unaffected.
     case DataType::Type::kInt64:
       spill_slots = &long_spill_slots_;
       break;
     case DataType::Type::kFloat32:
       spill_slots = &float_spill_slots_;
       break;
-    case DataType::Type::kReference:
     case DataType::Type::kInt32:
     case DataType::Type::kUint16:
     case DataType::Type::kUint8:

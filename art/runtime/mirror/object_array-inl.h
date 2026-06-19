@@ -112,8 +112,8 @@ inline void ObjectArray<T>::AssignableMemmove(int32_t dst_pos,
     }
   }
   // Perform the memmove using int memmove then perform the write barrier.
-  static_assert(sizeof(HeapReference<T>) == sizeof(uint32_t),
-                "art::mirror::HeapReference<T> and uint32_t have different sizes.");
+  static_assert(sizeof(HeapReference<T>) == kHeapReferenceSize,
+                "art::mirror::HeapReference<T> size mismatch.");
   // TODO: Optimize this later?
   // We can't use memmove since it does not handle read barriers and may do by per byte copying.
   // See b/32012820.
@@ -190,8 +190,8 @@ inline void ObjectArray<T>::AssignableMemcpy(int32_t dst_pos,
     }
   }
   // Perform the memmove using int memcpy then perform the write barrier.
-  static_assert(sizeof(HeapReference<T>) == sizeof(uint32_t),
-                "art::mirror::HeapReference<T> and uint32_t have different sizes.");
+  static_assert(sizeof(HeapReference<T>) == kHeapReferenceSize,
+                "art::mirror::HeapReference<T> size mismatch.");
   // TODO: Optimize this later?
   // We can't use memmove since it does not handle read barriers and may do by per byte copying.
   // See b/32012820.

@@ -77,7 +77,10 @@ inline vixl::aarch64::Register WRegisterFrom(Location location) {
 
 inline vixl::aarch64::Register RegisterFrom(Location location, DataType::Type type) {
   DCHECK(type != DataType::Type::kVoid && !DataType::IsFloatingPointType(type)) << type;
-  return type == DataType::Type::kInt64 ? XRegisterFrom(location) : WRegisterFrom(location);
+  // art-host fork (large heap): a native 8-byte reference is a 64-bit machine value and must live in
+  // an X register (Is64BitType now includes kReference), matching the 8-byte heap representation and
+  // the Load/Store width DCHECKs (dst.Is64Bits() == Is64BitType(type)).
+  return DataType::Is64BitType(type) ? XRegisterFrom(location) : WRegisterFrom(location);
 }
 
 inline vixl::aarch64::Register OutputRegister(HInstruction* instr) {
@@ -190,8 +193,9 @@ inline vixl::aarch64::SVEMemOperand SveStackOperandFrom(Location location) {
 
 inline vixl::aarch64::MemOperand HeapOperand(const vixl::aarch64::Register& base,
                                                     size_t offset = 0) {
-  // A heap reference must be 32bit, so fit in a W register.
-  DCHECK(base.IsW());
+  // art-host fork (large heap): native pointer-width references are 64-bit, so the heap base is a
+  // full 64-bit address in an X register (was a 32-bit compressed ref in a W register). base.X()
+  // yields the 64-bit addressing register whether base is W or X.
   return vixl::aarch64::MemOperand(base.X(), offset);
 }
 
@@ -199,8 +203,9 @@ inline vixl::aarch64::MemOperand HeapOperand(const vixl::aarch64::Register& base
                                                     const vixl::aarch64::Register& regoffset,
                                                     vixl::aarch64::Shift shift = vixl::aarch64::LSL,
                                                     unsigned shift_amount = 0) {
-  // A heap reference must be 32bit, so fit in a W register.
-  DCHECK(base.IsW());
+  // art-host fork (large heap): native pointer-width references are 64-bit, so the heap base is a
+  // full 64-bit address in an X register (was a 32-bit compressed ref in a W register). base.X()
+  // yields the 64-bit addressing register whether base is W or X.
   return vixl::aarch64::MemOperand(base.X(), regoffset, shift, shift_amount);
 }
 

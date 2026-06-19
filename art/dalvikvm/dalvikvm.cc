@@ -25,7 +25,12 @@
 
 #include "base/fast_exit.h"
 #include "jni.h"
+// art-host fork: in the fully static dalvikvms binary libart is linked in,
+// so JNI_CreateJavaVM resolves at link time and the JniInvocation dlopen
+// dispatcher must stay out of the link (its JNI_CreateJavaVM would clash).
+#ifndef ART_STATIC_DALVIKVM
 #include "nativehelper/JniInvocation.h"
+#endif
 #include "nativehelper/ScopedLocalRef.h"
 #include "nativehelper/toStringArray.h"
 
@@ -200,11 +205,18 @@ static int dalvikvm(int argc, char** argv) {
   }
 
   // Find the JNI_CreateJavaVM implementation.
+#ifdef ART_STATIC_DALVIKVM
+  // libart is linked in statically; -XXlib: is meaningless here.
+  if (lib != nullptr) {
+    fprintf(stderr, "Warning: -XXlib is ignored in the static dalvikvm\n");
+  }
+#else
   JniInvocation jni_invocation;
   if (!jni_invocation.Init(lib)) {
     fprintf(stderr, "Failed to initialize JNI invocation API from %s\n", lib);
     return EXIT_FAILURE;
   }
+#endif
 
   JavaVMInitArgs init_args;
   init_args.version = JNI_VERSION_1_6;

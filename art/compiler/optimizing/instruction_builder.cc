@@ -602,7 +602,7 @@ void HInstructionBuilder::UpdateLocal(uint32_t reg_number, HInstruction* stored_
 
   if (reg_number != 0) {
     HInstruction* local_low = (*current_locals_)[reg_number - 1];
-    if (local_low != nullptr && DataType::Is64BitType(local_low->GetType())) {
+    if (local_low != nullptr && DataType::IsWideType(local_low->GetType())) {
       // The vreg we are storing into was previously the high vreg of a pair.
       // We need to invalidate its low vreg.
       DCHECK((*current_locals_)[reg_number] == nullptr);
@@ -611,7 +611,7 @@ void HInstructionBuilder::UpdateLocal(uint32_t reg_number, HInstruction* stored_
   }
 
   (*current_locals_)[reg_number] = stored_value;
-  if (DataType::Is64BitType(stored_type)) {
+  if (DataType::IsWideType(stored_type)) {
     // We are storing a pair. Invalidate the instruction in the high vreg.
     (*current_locals_)[reg_number + 1] = nullptr;
   }
@@ -661,7 +661,7 @@ void HInstructionBuilder::InitializeParameters() {
     // Store the parameter value in the local that the dex code will use
     // to reference that parameter.
     UpdateLocal(locals_index++, parameter);
-    if (DataType::Is64BitType(parameter->GetType())) {
+    if (DataType::IsWideType(parameter->GetType())) {
       i++;
       locals_index++;
       parameter_index++;
@@ -678,9 +678,29 @@ void HInstructionBuilder::If_21_22t(const Instruction& instruction, uint32_t dex
       DataType::Type::kInt32);
   T* comparison = nullptr;
   if (kCompareWithZero) {
-    comparison = new (allocator_) T(value, graph_->GetIntConstant(0), dex_pc);
+    // art-host fork (large heap): with 64-bit references an if-eqz/if-nez reference null check must
+    // compare against the null *reference* constant, not the 32-bit int 0, so both operands of the
+    // comparison are reference-width.
+    HInstruction* zero = (value->GetType() == DataType::Type::kReference)
+        ? static_cast<HInstruction*>(graph_->GetNullConstant())
+        : static_cast<HInstruction*>(graph_->GetIntConstant(0));
+    comparison = new (allocator_) T(value, zero, dex_pc);
   } else {
     HInstruction* second = LoadLocal(instruction.VRegB_22t(), DataType::Type::kInt32);
+    // art-host fork (large heap): if-eq/if-ne can compare two references (one may be a null left in
+    // a local as int 0). If either operand is a reference, reload both as references so the
+    // comparison is reference-width on both sides. GetReferenceTypeEquivalent is null only for a
+    // type-conflicting (dead-path) phi; the null constant then keeps both operands non-null and
+    // reference-width without affecting any live comparison.
+    if (value->GetType() == DataType::Type::kReference ||
+        second->GetType() == DataType::Type::kReference) {
+      HInstruction* value_ref = LoadLocal(instruction.VRegA_22t(), DataType::Type::kReference);
+      HInstruction* second_ref = LoadLocal(instruction.VRegB_22t(), DataType::Type::kReference);
+      value = (value_ref != nullptr) ? value_ref
+                                     : static_cast<HInstruction*>(graph_->GetNullConstant());
+      second = (second_ref != nullptr) ? second_ref
+                                       : static_cast<HInstruction*>(graph_->GetNullConstant());
+    }
     comparison = new (allocator_) T(value, second, dex_pc);
   }
   AppendInstruction(comparison);

@@ -868,7 +868,7 @@ class ReadBarrierForHeapReferenceSlowPathX86_64 : public SlowPathCode {
         // larger than 2^26 - 1 (that is, 2^28 - 4 bytes).
         __ shll(CpuRegister(index_reg), Immediate(TIMES_4));
         static_assert(
-            sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
+            sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,
             "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
         __ AddImmediate(CpuRegister(index_reg), Immediate(offset_));
       } else {
@@ -5839,7 +5839,7 @@ void InstructionCodeGeneratorX86_64::VisitArrayGet(HArrayGet* instruction) {
   DataType::Type type = instruction->GetType();
   if (type == DataType::Type::kReference) {
     static_assert(
-        sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
+        sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,
         "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
     // /* HeapReference<Object> */ out =
     //     *(obj + data_offset + index * sizeof(HeapReference<Object>))
@@ -7988,7 +7988,7 @@ void InstructionCodeGeneratorX86_64::GenerateGcRootFieldLoad(
           sizeof(mirror::CompressedReference<mirror::Object>) == sizeof(GcRoot<mirror::Object>),
           "art::mirror::CompressedReference<mirror::Object> and art::GcRoot<mirror::Object> "
           "have different sizes.");
-      static_assert(sizeof(mirror::CompressedReference<mirror::Object>) == sizeof(int32_t),
+      static_assert(sizeof(mirror::CompressedReference<mirror::Object>) == kHeapReferenceSize,
                     "art::mirror::CompressedReference<mirror::Object> and int32_t "
                     "have different sizes.");
 
@@ -8048,7 +8048,7 @@ void CodeGeneratorX86_64::GenerateArrayLoadWithBakerReadBarrier(HInstruction* in
   DCHECK(EmitBakerReadBarrier());
 
   static_assert(
-      sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
+      sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,
       "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
   // /* HeapReference<Object> */ ref =
   //     *(obj + data_offset + index * sizeof(HeapReference<Object>))

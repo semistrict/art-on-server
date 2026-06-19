@@ -139,8 +139,11 @@ static bool TypePhiFromInputs(HPhi* phi) {
     DataType::Type input_type = HPhi::ToPhiType(input->GetType());
     if (common_type == input_type) {
       // No change in type.
-    } else if (DataType::Is64BitType(common_type) != DataType::Is64BitType(input_type)) {
-      // Types are of different sizes, e.g. int vs. long. Must be a conflict.
+    } else if (DataType::IsWideType(common_type) != DataType::IsWideType(input_type)) {
+      // Types are of different DEX widths, e.g. int vs. long. Must be a conflict. art-host fork
+      // (large heap): IsWideType (NOT Is64BitType) -- a native 8-byte reference is a single dex
+      // vreg, so a reference merged with a 1-vreg integral (the int-0/null ambiguity handled by the
+      // kReference branches just below) is NOT a width conflict.
       return false;
     } else if (DataType::IsIntegralType(common_type)) {
       // Previous inputs were integral, this one is not but is of the same size.

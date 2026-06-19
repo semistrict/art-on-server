@@ -799,7 +799,7 @@ class ReadBarrierForHeapReferenceSlowPathARMVIXL : public SlowPathCodeARMVIXL {
         // 2^26 - 1 (that is, 2^28 - 4 bytes).
         __ Lsl(index_reg, index_reg, TIMES_4);
         static_assert(
-            sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
+            sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,
             "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
         __ Add(index_reg, index_reg, offset_);
       } else {
@@ -6747,7 +6747,7 @@ void InstructionCodeGeneratorARMVIXL::VisitArrayGet(HArrayGet* instruction) {
       DCHECK(!(has_intermediate_address && codegen_->EmitReadBarrier()));
 
       static_assert(
-          sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
+          sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,
           "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
       // /* HeapReference<Object> */ out =
       //     *(obj + data_offset + index * sizeof(HeapReference<Object>))
@@ -9350,7 +9350,7 @@ void CodeGeneratorARMVIXL::GenerateArrayLoadWithBakerReadBarrier(Location ref,
   DCHECK(EmitBakerReadBarrier());
 
   static_assert(
-      sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
+      sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,
       "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
   ScaleFactor scale_factor = TIMES_4;
 

@@ -163,8 +163,11 @@ class LargeObjectSpace : public DiscontinuousSpace, public AllocSpace {
 class LargeObjectMapSpace : public LargeObjectSpace {
  public:
   // Creates a large object space. Allocations into the large object space use memory maps instead
-  // of malloc.
-  static LargeObjectMapSpace* Create(const std::string& name);
+  // of malloc. art-host fork (large heap): `low_4gb` keeps each large-object mapping in the low
+  // 4 GiB. It must match the placement of the main heap, because the mark-compact collector indexes
+  // large objects through a bitmap sized for the heap's range; a large object far outside that
+  // range (e.g. a high large object with a low main heap) is indexed out of bounds and crashes.
+  static LargeObjectMapSpace* Create(const std::string& name, bool low_4gb = false);
   // Return the storage space required by obj.
   size_t AllocationSize(mirror::Object* obj, size_t* usable_size) override REQUIRES(!lock_);
   mirror::Object* Alloc(Thread* self, size_t num_bytes, size_t* bytes_allocated,
@@ -183,7 +186,7 @@ class LargeObjectMapSpace : public LargeObjectSpace {
     MemMap mem_map;
     bool is_zygote;
   };
-  explicit LargeObjectMapSpace(const std::string& name);
+  explicit LargeObjectMapSpace(const std::string& name, bool low_4gb);
   virtual ~LargeObjectMapSpace() {}
 
   bool IsZygoteLargeObject(Thread* self, mirror::Object* obj) const override REQUIRES(!lock_);
@@ -193,13 +196,17 @@ class LargeObjectMapSpace : public LargeObjectSpace {
 
   AllocationTrackingSafeMap<mirror::Object*, LargeObject, kAllocatorTagLOSMaps> large_objects_
       GUARDED_BY(lock_);
+  // art-host fork (large heap): map each large object in the low 4 GiB when the main heap is there.
+  const bool low_4gb_;
 };
 
 // A continuous large object space with a free-list to handle holes.
 class FreeListSpace final : public LargeObjectSpace {
  public:
   virtual ~FreeListSpace();
-  static FreeListSpace* Create(const std::string& name, size_t capacity);
+  // art-host fork (large heap): `low_4gb` places the backing map in the low 4 GiB to match the
+  // main heap (see LargeObjectMapSpace::Create for why this must track the heap's placement).
+  static FreeListSpace* Create(const std::string& name, size_t capacity, bool low_4gb = false);
   size_t AllocationSize(mirror::Object* obj, size_t* usable_size) override
       REQUIRES(lock_);
   mirror::Object* Alloc(Thread* self, size_t num_bytes, size_t* bytes_allocated,

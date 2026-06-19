@@ -414,7 +414,9 @@ bool FastCompilerARM64::InitializeParameters() {
     UpdateLocal(vreg_parameter_index,
                 /* is_object= */ (type == DataType::Type::kReference),
                 /* can_be_null= */ true);
-    if (DataType::Is64BitType(type)) {
+    // art-host fork (large heap): IsWideType -- a wide dex parameter (long/double) occupies two dex
+    // vregs; a native 8-byte reference occupies ONE (analog of HInstructionBuilder::UpdateLocal).
+    if (DataType::IsWideType(type)) {
       ++i;
       ++vreg_parameter_index;
     }

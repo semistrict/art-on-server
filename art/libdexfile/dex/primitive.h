@@ -25,7 +25,8 @@
 
 namespace art {
 
-static constexpr size_t kObjectReferenceSize = 4;
+// art-host fork (large heap): native pointer width (uncompressed oops).
+static constexpr size_t kObjectReferenceSize = sizeof(uintptr_t);
 
 constexpr size_t ComponentSizeShiftWidth(size_t component_size) {
   return component_size == 1u ? 0u :

@@ -730,7 +730,12 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
   java_lang_Class->SetSuperClass(java_lang_Object.Get());
   mirror::Class::SetStatus(java_lang_Object, ClassStatus::kLoaded, self);
 
-  java_lang_Object->SetObjectSize(sizeof(mirror::Object));
+  // art-host fork (large heap): the logical instance size of java.lang.Object
+  // is the object header (class reference + lock word), not the C++ struct
+  // sizeof, which carries alignment tail padding when the class reference is
+  // native pointer width. Using the header size lets subclass fields pack into
+  // that padding and matches what the field linker computes.
+  java_lang_Object->SetObjectSize(mirror::kObjectHeaderSize);
   // Allocate in non-movable so that it's possible to check if a JNI weak global ref has been
   // cleared without triggering the read barrier and unintentionally mark the sentinel alive.
   runtime->SetSentinel(heap->AllocNonMovableObject(self,
@@ -1436,7 +1441,9 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
           image_header.GetImageRoot(ImageHeader::kClassRoots)));
   DCHECK_EQ(GetClassRoot<mirror::Class>(this)->GetClassFlags(), mirror::kClassFlagClass);
 
-  DCHECK_EQ(GetClassRoot<mirror::Object>(this)->GetObjectSize(), sizeof(mirror::Object));
+  // art-host fork (large heap): see SetObjectSize above — Object's instance
+  // size is the header size, not the (tail-padded) C++ struct size.
+  DCHECK_EQ(GetClassRoot<mirror::Object>(this)->GetObjectSize(), mirror::kObjectHeaderSize);
   ObjPtr<mirror::ObjectArray<mirror::Object>> boot_image_live_objects =
       ObjPtr<mirror::ObjectArray<mirror::Object>>::DownCast(
           image_header.GetImageRoot(ImageHeader::kBootImageLiveObjects));
@@ -3922,7 +3929,10 @@ LengthPrefixedArray<ArtField>* ClassLinker::AllocArtFieldArray(Thread* self,
     return nullptr;
   }
   // If the ArtField alignment changes, review all uses of LengthPrefixedArray<ArtField>.
-  static_assert(alignof(ArtField) == 4, "ArtField alignment is expected to be 4.");
+  // art-host fork (large heap): ArtField embeds a GcRoot (declaring class),
+  // which is native pointer width now, so ArtField aligns to that.
+  static_assert(alignof(ArtField) == kHeapReferenceSize,
+                "ArtField alignment is expected to match the heap reference size.");
   size_t storage_size = LengthPrefixedArray<ArtField>::ComputeSize(length);
   void* array_storage = allocator->Alloc(self, storage_size, LinearAllocKind::kArtFieldArray);
   auto* ret = new(array_storage) LengthPrefixedArray<ArtField>(length);
@@ -9709,6 +9719,14 @@ bool ClassLinker::LinkFieldsHelper::LinkFields(ClassLinker* class_linker,
   }
 
   size_t size = field_offset.Uint32Value();
+  // art-host fork (large heap): round the instance size up to the object
+  // alignment so it matches the (object-aligned) sizeof of the corresponding
+  // packed C++ mirror struct, and so subclass fields start at an 8-aligned
+  // offset — keeping native-pointer-width reference fields naturally aligned.
+  // For instance classes only; the static-fields region size is not an object.
+  if (!is_static) {
+    size = RoundUp(size, kObjectAlignment);
+  }
   // Update klass
   if (is_static) {
     klass->SetNumReferenceStaticFields(num_reference_fields);
@@ -9742,7 +9760,7 @@ bool ClassLinker::LinkFieldsHelper::LinkFields(ClassLinker* class_linker,
     }
     if (!klass->IsVariableSize()) {
       std::string temp;
-      DCHECK_GE(size, sizeof(mirror::Object)) << klass->GetDescriptor(&temp);
+      DCHECK_GE(size, mirror::kObjectHeaderSize) << klass->GetDescriptor(&temp);
       size_t previous_size = klass->GetObjectSize();
       if (previous_size != 0) {
         // Make sure that we didn't originally have an incorrect size.

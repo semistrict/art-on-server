@@ -143,7 +143,13 @@ class IrtEntry {
   uint32_t serial_;  // Incremented for each reuse; checked against reference.
   GcRoot<mirror::Object> reference_;
 };
-static_assert(sizeof(IrtEntry) == 2 * sizeof(uint32_t), "Unexpected sizeof(IrtEntry)");
+// art-host fork (large heap): GcRoot is native pointer width now, so an entry
+// is serial + alignment padding + reference (4+4+8 = 16). Still a power of
+// two, which the table's index<->address math relies on.
+static_assert(sizeof(IrtEntry) ==
+                  RoundUp(sizeof(uint32_t) + sizeof(GcRoot<mirror::Object>),
+                          alignof(GcRoot<mirror::Object>)),
+              "Unexpected sizeof(IrtEntry)");
 static_assert(IsPowerOfTwo(sizeof(IrtEntry)), "Unexpected sizeof(IrtEntry)");
 
 class IndirectReferenceTable {

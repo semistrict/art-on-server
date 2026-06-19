@@ -1700,7 +1700,9 @@ static HInstruction* GetInvokeInputForArgVRegIndex(HInvoke* invoke_instruction,
   size_t input_index = 0;
   for (size_t i = 0; i < arg_vreg_index; ++i, ++input_index) {
     DCHECK_LT(input_index, invoke_instruction->GetNumberOfArguments());
-    if (DataType::Is64BitType(invoke_instruction->InputAt(input_index)->GetType())) {
+    // art-host fork (large heap): IsWideType -- a wide DEX arg (long/double) consumes two argument
+    // vregs; a native 8-byte reference still consumes ONE, so it must not skip a vreg here.
+    if (DataType::IsWideType(invoke_instruction->InputAt(input_index)->GetType())) {
       ++i;
       DCHECK_NE(i, arg_vreg_index);
     }

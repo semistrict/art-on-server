@@ -424,8 +424,15 @@ SAVE_SIZE=8*8   // x4, x5, <padding>, x19, x20, x21, FP, LR saved.
     mov xFP, sp                            // Use xFP for frame pointer, as it's callee-saved.
     .cfi_def_cfa_register xFP
 
-    add x10, x2, #(__SIZEOF_POINTER__ + 0xf) // Reserve space for ArtMethod*, arguments and
-    and x10, x10, # ~0xf                   // round up for 16-byte stack alignment.
+    // art-host fork (large heap): the generic-JNI trampoline spills 8-byte
+    // (native pointer width) StackReferences into this outgoing-arg area, two
+    // 4-byte vreg slots per reference. A method whose args are all references
+    // therefore needs up to 2*args_size bytes here; reserve that so the spill
+    // cannot overflow into the saved x4/x5 (result/shorty) above xFP. args are
+    // still copied to the bottom (sp+8); the surplus is spill headroom.
+    add w10, w2, w2                        // 2 * args_size (room for 8-byte ref spills)
+    add x10, x10, #(__SIZEOF_POINTER__ + 0xf) // + ArtMethod*, round up for 16-byte alignment.
+    and x10, x10, # ~0xf
     sub sp, sp, x10                        // Adjust SP for ArtMethod*, args and alignment padding.
 
     mov xSELF, x3                          // Move thread pointer into SELF register.
@@ -549,7 +556,8 @@ SAVE_SIZE=8*8   // x4, x5, <padding>, x19, x20, x21, FP, LR saved.
 
     // Load this (if instance method) and addresses for routines that load WXSD registers.
     .ifc \suffix, _instance
-        ldr w1, [x9], #4            // Load "this" parameter, and increment arg pointer.
+        // art-host fork (large heap): "this" is a native-pointer-width reference (8 bytes).
+        ldr x1, [x9], #8            // Load "this" parameter, and increment arg pointer.
         adr x11, .Lload_w2\suffix
         adr x12, .Lload_x2\suffix
     .else
@@ -565,6 +573,12 @@ SAVE_SIZE=8*8   // x4, x5, <padding>, x19, x20, x21, FP, LR saved.
     cbz w17, .Lcall_method\suffix   // Exit at end of signature. Shorty 0 terminated.
 
     cmp w17, #'J'                   // Is this a long?
+    beq .Lload_long\suffix
+
+    // art-host fork (large heap): a reference ('L', covers all object/array types in
+    // the shorty) is native pointer width (8 bytes); load it into an X register and
+    // advance the arg pointer by 8, exactly like a long.
+    cmp w17, #'L'
     beq .Lload_long\suffix
 
     cmp  w17, #'F'                  // Is this a float?
@@ -1034,19 +1048,22 @@ ENTRY art_quick_aput_obj
 #ifdef USE_READ_BARRIER
     cbnz wMR, .Laput_obj_gc_marking
 #endif  // USE_READ_BARRIER
-    ldr w3, [x0, #MIRROR_OBJECT_CLASS_OFFSET]          // Heap reference = 32b; zero-extends to x3.
-    UNPOISON_HEAP_REF w3
-    ldr w3, [x3, #MIRROR_CLASS_COMPONENT_TYPE_OFFSET]  // Heap reference = 32b; zero-extends to x3.
-    UNPOISON_HEAP_REF w3
-    ldr w4, [x2, #MIRROR_OBJECT_CLASS_OFFSET]          // Heap reference = 32b; zero-extends to x4.
-    UNPOISON_HEAP_REF w4
+    // art-host fork (large heap): klass_ / component_type_ are native 8-byte references; load them
+    // full width (X). A W load truncates a class mapped above 4 GiB (classes load high under
+    // -Xnoimage), and the second load would then index off a truncated base.
+    ldr x3, [x0, #MIRROR_OBJECT_CLASS_OFFSET]          // Heap reference = 64b (array klass).
+    UNPOISON_HEAP_REF x3
+    ldr x3, [x3, #MIRROR_CLASS_COMPONENT_TYPE_OFFSET]  // Heap reference = 64b (component type).
+    UNPOISON_HEAP_REF x3
+    ldr x4, [x2, #MIRROR_OBJECT_CLASS_OFFSET]          // Heap reference = 64b (value klass).
+    UNPOISON_HEAP_REF x4
 #endif  // !defined(USE_READ_BARRIER) || defined(USE_BAKER_READ_BARRIER)
-    cmp w3, w4  // value's type == array's component type - trivial assignability
+    cmp x3, x4  // value's type == array's component type - trivial assignability (full 64-bit)
     bne .Laput_obj_check_assignability
 .Laput_obj_store:
     add x3, x0, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
-    POISON_HEAP_REF w2
-    str w2, [x3, x1, lsl #2]                           // Heap reference = 32b.
+    POISON_HEAP_REF x2
+    str x2, [x3, x1, lsl #3]                           // Heap reference = 64b (8-byte element).
     ldr x3, [xSELF, #THREAD_CARD_TABLE_OFFSET]
     lsr x0, x0, #CARD_TABLE_CARD_SHIFT
     strb w3, [x3, x0]
@@ -1054,7 +1071,7 @@ ENTRY art_quick_aput_obj
 
 .Laput_obj_null:
     add x3, x0, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
-    str w2, [x3, x1, lsl #2]                           // Heap reference = 32b.
+    str x2, [x3, x1, lsl #3]                           // Heap reference = 64b (8-byte element).
     ret
 
 .Laput_obj_check_assignability:
@@ -1076,8 +1093,8 @@ ENTRY art_quick_aput_obj
     RESTORE_TWO_REGS_DECREASE_FRAME x0, x1, 32
 
     add x3, x0, #MIRROR_OBJECT_ARRAY_DATA_OFFSET
-    POISON_HEAP_REF w2
-    str w2, [x3, x1, lsl #2]                           // Heap reference = 32b.
+    POISON_HEAP_REF x2
+    str x2, [x3, x1, lsl #3]                           // Heap reference = 64b (8-byte element).
     ldr x3, [xSELF, #THREAD_CARD_TABLE_OFFSET]
     lsr x0, x0, #CARD_TABLE_CARD_SHIFT
     strb w3, [x3, x0]
@@ -1192,7 +1209,11 @@ ENTRY \name
     SETUP_SAVE_EVERYTHING_FRAME \runtime_method_offset       // save everything for stack crawl
     mov   x1, xSELF                   // pass Thread::Current
     CALL_SYMBOL \entrypoint           // (int32_t index, Thread* self)
-    cbz   w0, 1f                      // If result is null, deliver the OOME.
+    // art-host fork (large heap): the result is a native pointer-width (8-byte) reference (a
+    // resolved Class/String/MethodType/MethodHandle). Test the full 64-bit register for null --
+    // a `cbz w0` would treat a non-null reference whose low 32 bits are zero (a >4 GiB object) as
+    // null and deliver a non-existent OOME, aborting in QuickDeliverException (exception != null).
+    cbz   x0, 1f                      // If result is null, deliver the OOME.
     DEOPT_OR_RESTORE_SAVE_EVERYTHING_FRAME_AND_RETURN_X0 x1, /* is_ref= */ 1
 1:
     DELIVER_PENDING_EXCEPTION_FRAME_READY
@@ -1206,7 +1227,12 @@ END \name
 
 .macro RETURN_OR_DEOPT_IF_RESULT_IS_NON_NULL_OR_DELIVER
     CFI_REMEMBER_STATE
-    cbz w0, 1f                       // result zero branch over
+    // art-host fork (large heap): the result is a native pointer-width (8-byte) object reference
+    // (object/array allocation, StringBuilder.append). Test the full 64-bit register for null -- a
+    // `cbz w0` would treat a non-null reference whose low 32 bits are zero (a successfully
+    // allocated object above 4 GiB) as null and deliver a non-existent exception, aborting in
+    // QuickDeliverException (CHECK(exception != nullptr)).
+    cbz x0, 1f                       // result zero branch over
     DEOPT_OR_RETURN x1, /*is_ref=*/1 // check for deopt or return
 1:
     CFI_RESTORE_STATE_AND_DEF_CFA sp, 0
@@ -1315,7 +1341,8 @@ ENTRY \c_name
 #error "Class pointer needs to overwrite next pointer."
 #endif
     POISON_HEAP_REF w0
-    str    w0, [x3, #MIRROR_OBJECT_CLASS_OFFSET]
+    // art-host fork (large heap): klass_ is a native 8-byte reference; store the full class pointer.
+    str    x0, [x3, #MIRROR_OBJECT_CLASS_OFFSET]
                                                               // Push the new object onto the thread
                                                               // local allocation stack and
                                                               // increment the thread local
@@ -1391,7 +1418,9 @@ ART_QUICK_ALLOC_OBJECT_ROSALLOC art_quick_alloc_object_initialized_rosalloc, \
     bhi    \slowPathLabel
     str    x6, [xSELF, #THREAD_LOCAL_POS_OFFSET]              // Store new thread_local_pos.
     POISON_HEAP_REF w0
-    str    w0, [x4, #MIRROR_OBJECT_CLASS_OFFSET]              // Store the class pointer.
+    // art-host fork (large heap): klass_ is a native 8-byte reference; store the full class pointer
+    // (str w0 truncated it above 4 GiB, so newly-allocated objects had a corrupt class).
+    str    x0, [x4, #MIRROR_OBJECT_CLASS_OFFSET]              // Store the class pointer.
     mov    x0, x4
     // No barrier. The class is already observably initialized (otherwise the fast
     // path size check above would fail) and new-instance allocations are protected
@@ -1463,7 +1492,8 @@ GENERATE_ALLOC_OBJECT_RESOLVED_TLAB \
     add    \xTemp0, \xTemp0, \xTemp1
     str    \xTemp0, [xSELF, #THREAD_LOCAL_POS_OFFSET]         // Store new thread_local_pos.
     POISON_HEAP_REF \wClass
-    str    \wClass, [x0, #MIRROR_OBJECT_CLASS_OFFSET]         // Store the class pointer.
+    // art-host fork (large heap): klass_ is a native 8-byte reference; store the full class pointer.
+    str    \xClass, [x0, #MIRROR_OBJECT_CLASS_OFFSET]         // Store the class pointer.
     str    \wCount, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]         // Store the array length.
 // new-array is special. The class is loaded and immediately goes to the Initialized state
 // before it is published. Therefore the only fence needed is for the publication of the object.
@@ -1511,15 +1541,18 @@ END \name
     lsl    \xTemp1, \xCount, \xTemp0                          // Calculate data size
     // Add array data offset and alignment.
     add    \xTemp1, \xTemp1, #(MIRROR_INT_ARRAY_DATA_OFFSET + OBJECT_ALIGNMENT_MASK)
-#if MIRROR_LONG_ARRAY_DATA_OFFSET != MIRROR_INT_ARRAY_DATA_OFFSET + 4
-#error Long array data offset must be 4 greater than int array data offset.
-#endif
-
+#if MIRROR_LONG_ARRAY_DATA_OFFSET == MIRROR_INT_ARRAY_DATA_OFFSET + 4
     add    \xTemp0, \xTemp0, #1                               // Add 4 to the length only if the
                                                               // component size shift is 3
                                                               // (for 64 bit alignment).
     and    \xTemp0, \xTemp0, #4
     add    \xTemp1, \xTemp1, \xTemp0
+#elif MIRROR_LONG_ARRAY_DATA_OFFSET != MIRROR_INT_ARRAY_DATA_OFFSET
+#error Unexpected long vs int array data offset relationship.
+#endif
+    // art-host fork (large heap): with a native-pointer-width class reference
+    // the array header is already 8-aligned, so the int and long array data
+    // offsets are equal and the 64-bit-component adjustment above is omitted.
 .endm
 
 .macro COMPUTE_ARRAY_SIZE_8 \
@@ -2484,53 +2517,57 @@ ENTRY art_quick_update_inline_cache
     // Don't update the cache if we are marking.
     cbnz wMR, .Ldone
 #endif
+    // art-host fork (large heap): InlineCache::classes_ is GcRoot<Class>[5], now 8 bytes per entry
+    // (native pointer-width references). x0 holds the full 8-byte class. Use an 8-byte stride
+    // (i*8) and 8-byte ldr/ldxr/stxr; the old 4-byte stride spliced two receiver classes into one
+    // 8-byte slot, corrupting the inline cache the optimizing inliner later reads.
 .Lentry1:
-    ldr w9, [x8, #INLINE_CACHE_CLASSES_OFFSET]
-    cmp w9, w0
+    ldr x9, [x8, #INLINE_CACHE_CLASSES_OFFSET]
+    cmp x9, x0
     beq .Ldone
-    cbnz w9, .Lentry2
+    cbnz x9, .Lentry2
     add x10, x8, #INLINE_CACHE_CLASSES_OFFSET
-    ldxr w9, [x10]
-    cbnz w9, .Lentry1
-    stxr  w9, w0, [x10]
+    ldxr x9, [x10]
+    cbnz x9, .Lentry1
+    stxr  w9, x0, [x10]
     cbz   w9, .Ldone
     b .Lentry1
 .Lentry2:
-    ldr w9, [x8, #INLINE_CACHE_CLASSES_OFFSET+4]
-    cmp w9, w0
+    ldr x9, [x8, #INLINE_CACHE_CLASSES_OFFSET+8]
+    cmp x9, x0
     beq .Ldone
-    cbnz w9, .Lentry3
-    add x10, x8, #INLINE_CACHE_CLASSES_OFFSET+4
-    ldxr w9, [x10]
-    cbnz w9, .Lentry2
-    stxr  w9, w0, [x10]
+    cbnz x9, .Lentry3
+    add x10, x8, #INLINE_CACHE_CLASSES_OFFSET+8
+    ldxr x9, [x10]
+    cbnz x9, .Lentry2
+    stxr  w9, x0, [x10]
     cbz   w9, .Ldone
     b .Lentry2
 .Lentry3:
-    ldr w9, [x8, #INLINE_CACHE_CLASSES_OFFSET+8]
-    cmp w9, w0
+    ldr x9, [x8, #INLINE_CACHE_CLASSES_OFFSET+16]
+    cmp x9, x0
     beq .Ldone
-    cbnz w9, .Lentry4
-    add x10, x8, #INLINE_CACHE_CLASSES_OFFSET+8
-    ldxr w9, [x10]
-    cbnz w9, .Lentry3
-    stxr  w9, w0, [x10]
+    cbnz x9, .Lentry4
+    add x10, x8, #INLINE_CACHE_CLASSES_OFFSET+16
+    ldxr x9, [x10]
+    cbnz x9, .Lentry3
+    stxr  w9, x0, [x10]
     cbz   w9, .Ldone
     b .Lentry3
 .Lentry4:
-    ldr w9, [x8, #INLINE_CACHE_CLASSES_OFFSET+12]
-    cmp w9, w0
+    ldr x9, [x8, #INLINE_CACHE_CLASSES_OFFSET+24]
+    cmp x9, x0
     beq .Ldone
-    cbnz w9, .Lentry5
-    add x10, x8, #INLINE_CACHE_CLASSES_OFFSET+12
-    ldxr w9, [x10]
-    cbnz w9, .Lentry4
-    stxr  w9, w0, [x10]
+    cbnz x9, .Lentry5
+    add x10, x8, #INLINE_CACHE_CLASSES_OFFSET+24
+    ldxr x9, [x10]
+    cbnz x9, .Lentry4
+    stxr  w9, x0, [x10]
     cbz   w9, .Ldone
     b .Lentry4
 .Lentry5:
     // Unconditionally store, the inline cache is megamorphic.
-    str  w0, [x8, #INLINE_CACHE_CLASSES_OFFSET+16]
+    str  x0, [x8, #INLINE_CACHE_CLASSES_OFFSET+32]
 .Ldone:
     ret
 END art_quick_update_inline_cache

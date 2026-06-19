@@ -42,6 +42,7 @@ class ClassLinker;
 class DexFile;
 class OatDexFile;
 class RootVisitor;
+class ShadowFrame;
 struct RuntimeArgumentMap;
 union JValue;
 
@@ -302,7 +303,10 @@ class Jit {
 
   // Return the information required to do an OSR jump. Return null if the OSR
   // cannot be done.
-  OsrData* PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs)
+  OsrData* PrepareForOsr(ArtMethod* method,
+                         uint32_t dex_pc,
+                         uint32_t* vregs,
+                         ShadowFrame* shadow_frame)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // If an OSR compiled version is available for `method`,

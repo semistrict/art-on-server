@@ -61,7 +61,14 @@ class RegionSpace final : public ContinuousMemMapAllocSpace {
   // Create a region space mem map with the requested sizes. The requested base address is not
   // guaranteed to be granted, if it is required, the caller should call Begin on the returned
   // space to confirm the request was granted.
-  static MemMap CreateMemMap(const std::string& name, size_t capacity, uint8_t* requested_begin);
+  // `reservation`, when non-null, is an existing address-space reservation out of whose front
+  // the map is carved (transferring ownership). This keeps the region space virtually contiguous
+  // with the spaces carved before it, bounding the card table (see Heap::Heap). When null,
+  // `requested_begin` is used only as a placement hint.
+  static MemMap CreateMemMap(const std::string& name,
+                             size_t capacity,
+                             uint8_t* requested_begin,
+                             MemMap* reservation = nullptr);
   static RegionSpace* Create(const std::string& name, MemMap&& mem_map, bool use_generational_cc);
 
   // Allocate `num_bytes`, returns null if the space is full.

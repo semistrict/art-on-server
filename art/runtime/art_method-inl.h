@@ -126,9 +126,14 @@ template <> struct ShortyTraits<'L'> {
   static Type Get(const JValue& value) REQUIRES_SHARED(Locks::mutator_lock_) {
       return value.GetL();
   }
-  static constexpr size_t kVRegCount = 1u;
+  // art-host fork (large heap): a reference is native pointer width (8 bytes),
+  // occupying two 4-byte arg slots, written little-endian to match the invoke
+  // stub's 8-byte X-register load for 'L'.
+  static constexpr size_t kVRegCount = 2u;
   static void Set(uint32_t* args, Type value) REQUIRES_SHARED(Locks::mutator_lock_) {
-    args[0] = StackReference<mirror::Object>::FromMirrorPtr(value.Ptr()).AsVRegValue();
+    uintptr_t ref = reinterpret_cast<uintptr_t>(value.Ptr());
+    args[0] = static_cast<uint32_t>(ref);
+    args[1] = static_cast<uint32_t>(ref >> 32);
   }
 };
 

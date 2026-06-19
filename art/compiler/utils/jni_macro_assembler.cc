@@ -105,8 +105,9 @@ template <PointerSize kPointerSize>
 void JNIMacroAssembler<kPointerSize>::LoadGcRootWithoutReadBarrier(ManagedRegister dest,
                                                                    ManagedRegister base,
                                                                    MemberOffset offs) {
-  static_assert(sizeof(uint32_t) == sizeof(GcRoot<mirror::Object>));
-  Load(dest, base, offs, sizeof(uint32_t));
+  // art-host fork (large heap): Gc-roots are native pointer width.
+  static_assert(sizeof(GcRoot<mirror::Object>) == kHeapReferenceSize);
+  Load(dest, base, offs, sizeof(GcRoot<mirror::Object>));
 }
 
 template
@@ -120,8 +121,9 @@ void JNIMacroAssembler<PointerSize::k64>::LoadGcRootWithoutReadBarrier(ManagedRe
 
 template <PointerSize kPointerSize>
 void JNIMacroAssembler<kPointerSize>::LoadStackReference(ManagedRegister dest, FrameOffset offs) {
-  static_assert(sizeof(uint32_t) == sizeof(StackReference<mirror::Object>));
-  Load(dest, offs, sizeof(uint32_t));
+  // art-host fork (large heap): stack references are native pointer width.
+  static_assert(sizeof(StackReference<mirror::Object>) == kHeapReferenceSize);
+  Load(dest, offs, sizeof(StackReference<mirror::Object>));
 }
 
 template

@@ -157,7 +157,11 @@ class EXPORT BumpPointerSpace final : public ContinuousMemMapAllocSpace {
   accounting::ContinuousSpaceBitmap::SweepCallback* GetSweepCallback() override;
 
   // Record objects / bytes freed.
-  void RecordFree(int32_t objects, int32_t bytes) {
+  // art-host fork (large heap): `bytes` is full width (int64_t). The moving-space bytes reclaimed
+  // by a single compaction exceeds INT32_MAX once the moving space is larger than 2 GiB, so a
+  // 32-bit parameter (and a 32-bit bytes_allocated_ counter) would truncate/overflow and corrupt
+  // the heap's num_bytes_allocated_ accounting (spurious OOM).
+  void RecordFree(int32_t objects, int64_t bytes) {
     objects_allocated_.fetch_sub(objects, std::memory_order_relaxed);
     bytes_allocated_.fetch_sub(bytes, std::memory_order_relaxed);
   }
@@ -182,7 +186,11 @@ class EXPORT BumpPointerSpace final : public ContinuousMemMapAllocSpace {
 
   uint8_t* growth_end_;
   AtomicInteger objects_allocated_;  // Accumulated from revoked thread local regions.
-  AtomicInteger bytes_allocated_;  // Accumulated from revoked thread local regions.
+  // art-host fork (large heap): full-width (64-bit) byte counter. It accumulates revoked TLAB
+  // bytes (size_t) and is decremented by RecordFree with the moving-space compaction reclaim, both
+  // of which exceed INT32_MAX at multi-GiB heaps. A 32-bit counter overflowed and corrupted the
+  // heap's num_bytes_allocated_ accounting, producing spurious OutOfMemoryError.
+  Atomic<int64_t> bytes_allocated_;  // Accumulated from revoked thread local regions.
   Mutex lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
   // The objects at the start of the space are stored in the main block.
   size_t main_block_size_ GUARDED_BY(lock_);

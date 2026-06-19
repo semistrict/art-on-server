@@ -930,19 +930,19 @@ class CodeGeneratorARM64 : public CodeGenerator {
   vixl::aarch64::Literal<uint32_t>* DeduplicateBootImageAddressLiteral(uint64_t address) {
     return jit_patches_.DeduplicateBootImageAddressLiteral(address);
   }
-  vixl::aarch64::Literal<uint32_t>* DeduplicateJitStringLiteral(const DexFile& dex_file,
+  vixl::aarch64::Literal<uint64_t>* DeduplicateJitStringLiteral(const DexFile& dex_file,
                                                                 dex::StringIndex string_index,
                                                                 Handle<mirror::String> handle) {
     return jit_patches_.DeduplicateJitStringLiteral(
         dex_file, string_index, handle, GetCodeGenerationData());
   }
-  vixl::aarch64::Literal<uint32_t>* DeduplicateJitClassLiteral(const DexFile& dex_file,
+  vixl::aarch64::Literal<uint64_t>* DeduplicateJitClassLiteral(const DexFile& dex_file,
                                                                dex::TypeIndex class_index,
                                                                Handle<mirror::Class> handle) {
     return jit_patches_.DeduplicateJitClassLiteral(
         dex_file, class_index, handle, GetCodeGenerationData());
   }
-  vixl::aarch64::Literal<uint32_t>* DeduplicateJitMethodTypeLiteral(
+  vixl::aarch64::Literal<uint64_t>* DeduplicateJitMethodTypeLiteral(
       const DexFile& dex_file,
       dex::ProtoIndex proto_index,
       Handle<mirror::MethodType> handle) {

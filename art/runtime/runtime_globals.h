@@ -170,7 +170,10 @@ static constexpr TraceClockSource kDefaultTraceClockSource = TraceClockSource::k
 static constexpr bool kDefaultMustRelocate = true;
 
 // Size of a heap reference.
-static constexpr size_t kHeapReferenceSize = sizeof(uint32_t);
+// art-host fork (large heap): native pointer width (uncompressed oops) so the
+// managed heap is not capped at 4 GiB. Must match mirror::HeapReference and
+// the compiler's DataType::kObjectReferenceSize.
+static constexpr size_t kHeapReferenceSize = sizeof(uintptr_t);
 
 }  // namespace art
 

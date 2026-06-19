@@ -3639,7 +3639,11 @@ void IntrinsicCodeGeneratorX86::HandleValueOf(HInvoke* invoke,
     __ j(kAboveEqual, &allocate);
     // If the value is within the bounds, load the object directly from the array.
     constexpr size_t kElementSize = sizeof(mirror::HeapReference<mirror::Object>);
-    static_assert((1u << TIMES_4) == sizeof(mirror::HeapReference<mirror::Object>),
+    // art-host fork (large heap): references are native pointer width. This
+    // x86 boot-image IntegerCache intrinsic still uses a 32-bit (TIMES_4)
+    // scaled load below; it is inactive on the arm64 host SDK (wrong arch and
+    // -Xnoimage). TODO(largeheap): widen to TIMES_8/movq for x86 large-heap.
+    static_assert((1u << TIMES_4) == sizeof(uint32_t),
                   "Check heap reference size.");
     if (codegen_->GetCompilerOptions().IsBootImage()) {
       DCHECK_EQ(invoke->InputCount(), invoke->GetNumberOfArguments() + 1u);

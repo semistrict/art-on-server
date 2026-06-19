@@ -45,7 +45,9 @@ class ArgArray {
  public:
   ArgArray(const char* shorty, uint32_t shorty_len)
       : shorty_(shorty), shorty_len_(shorty_len), num_bytes_(0) {
-    size_t num_slots = shorty_len + 1;  // +1 in case of receiver.
+    // art-host fork (large heap): +2 — a possible receiver is a native-pointer-width
+    // reference occupying two 4-byte slots.
+    size_t num_slots = shorty_len + 2;
     if (LIKELY((num_slots * 2) < kSmallArgArraySize)) {
       // We can trivially use the small arg array.
       arg_array_ = small_arg_array_;
@@ -53,7 +55,9 @@ class ArgArray {
       // Analyze shorty to see if we need the large arg array.
       for (size_t i = 1; i < shorty_len; ++i) {
         char c = shorty[i];
-        if (c == 'J' || c == 'D') {
+        // art-host fork (large heap): a reference ('L') is native pointer width and
+        // occupies two 4-byte arg-array slots, like a long/double.
+        if (c == 'J' || c == 'D' || c == 'L') {
           num_slots++;
         }
       }
@@ -80,7 +84,16 @@ class ArgArray {
   }
 
   void Append(ObjPtr<mirror::Object> obj) REQUIRES_SHARED(Locks::mutator_lock_) {
-    Append(StackReference<mirror::Object>::FromMirrorPtr(obj.Ptr()).AsVRegValue());
+    // art-host fork (large heap): a reference argument is native pointer width
+    // (8 bytes). Store it little-endian across two 4-byte arg-array slots so the
+    // invoke stub loads it with a single 8-byte X-register load (matching the
+    // 'L' -> X-register routing in art_quick_invoke_stub). Stack/register
+    // reference slots use the unpoisoned StackReference encoding, i.e. the raw
+    // object pointer.
+    uintptr_t ref = reinterpret_cast<uintptr_t>(obj.Ptr());
+    arg_array_[num_bytes_ / 4] = static_cast<uint32_t>(ref);
+    arg_array_[num_bytes_ / 4 + 1] = static_cast<uint32_t>(ref >> 32);
+    num_bytes_ += 8;
   }
 
   void AppendWide(uint64_t value) {
@@ -185,18 +198,25 @@ class ArgArray {
     // Set receiver if non-null (method is not static)
     size_t cur_arg = arg_offset;
     if (!shadow_frame->GetMethod()->IsStatic()) {
-      Append(shadow_frame->GetVReg(cur_arg));
+      // art-host fork (large heap): the receiver is a native-pointer-width reference;
+      // read it from the 8-byte References() side array, not the 4-byte vreg value
+      // slot (GetVReg), which truncates references above 4 GiB.
+      Append(shadow_frame->GetVRegReference(cur_arg));
       cur_arg++;
     }
     for (size_t i = 1; i < shorty_len_; ++i) {
       switch (shorty_[i]) {
+        case 'L':
+          // art-host fork (large heap): full 8-byte reference (see receiver above).
+          Append(shadow_frame->GetVRegReference(cur_arg));
+          cur_arg++;
+          break;
         case 'Z':
         case 'B':
         case 'C':
         case 'S':
         case 'I':
         case 'F':
-        case 'L':
           Append(shadow_frame->GetVReg(cur_arg));
           cur_arg++;
           break;
@@ -522,6 +542,26 @@ bool InvokeMethodImpl(const ScopedObjectAccessAlreadyRunnable& soa,
 }
 
 }  // anonymous namespace
+
+// art-host fork (large heap): invoke a method whose arguments live in an
+// interpreter ShadowFrame, marshaling them through an ArgArray so that
+// reference arguments are passed at native pointer width (8 bytes). The old
+// ArtInterpreterToCompiledCodeBridge fast path handed the 4-byte vreg value
+// region straight to the invoke stub, truncating any reference above 4 GiB.
+// `ArgArray` is file-local (anonymous namespace), so this thin wrapper exposes
+// the frame->native invoke for the interpreter bridge.
+void InvokeMethodFromShadowFrame(Thread* self,
+                                 ArtMethod* method,
+                                 ShadowFrame* shadow_frame,
+                                 uint32_t arg_offset,
+                                 JValue* result) {
+  uint32_t shorty_len = 0;
+  const char* shorty =
+      method->GetInterfaceMethodIfProxy(kRuntimePointerSize)->GetShorty(&shorty_len);
+  ArgArray arg_array(shorty, shorty_len);
+  arg_array.BuildArgArrayFromFrame(shadow_frame, arg_offset);
+  method->Invoke(self, arg_array.GetArray(), arg_array.GetNumBytes(), result, shorty);
+}
 
 template <>
 NO_STACK_PROTECTOR

@@ -35,8 +35,20 @@ union JValue;
 class ScopedObjectAccessAlreadyRunnable;
 class ShadowFrame;
 
+class Thread;
+
 EXPORT ObjPtr<mirror::Object> BoxPrimitive(Primitive::Type src_class, const JValue& value)
     REQUIRES_SHARED(Locks::mutator_lock_);
+
+// art-host fork (large heap): invoke `method` with arguments taken from
+// `shadow_frame` starting at `arg_offset`, marshaling reference arguments at
+// native pointer width (8 bytes) via an ArgArray. Used by the interpreter's
+// bridge to compiled/native code so references above 4 GiB are not truncated.
+EXPORT void InvokeMethodFromShadowFrame(Thread* self,
+                                        ArtMethod* method,
+                                        ShadowFrame* shadow_frame,
+                                        uint32_t arg_offset,
+                                        JValue* result) REQUIRES_SHARED(Locks::mutator_lock_);
 
 EXPORT bool UnboxPrimitiveForField(ObjPtr<mirror::Object> o,
                                    ObjPtr<mirror::Class> dst_class,

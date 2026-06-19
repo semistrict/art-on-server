@@ -617,15 +617,27 @@ class DeoptimizeStackVisitor final : public StackVisitor {
       static constexpr uint32_t kDeadValue = 0xEBADDE09;
       uint32_t value = kDeadValue;
       bool is_reference = false;
+      // art-host fork (large heap): an object reference is a native pointer-width (8-byte) value,
+      // so it may have non-zero high bits when the heap maps above 4 GiB. When this vreg holds a
+      // reference, read it at full width into `ref` (a 4-byte `value` would truncate it and feed a
+      // bad pointer to SetVRegReference, crashing the deopt itself or the next GC root walk). The
+      // primitive path keeps the 4-byte `value`. This mirrors the GC root walk in
+      // Thread::ReferenceMapVisitor (thread.cc), which reads stack-mask references as 8-byte
+      // StackReferences at byte offset bit*kVRegSize and register references via GetGPRAddress.
+      mirror::Object* ref = nullptr;
 
       switch (location) {
         case DexRegisterLocation::Kind::kInStack: {
           const int32_t offset = vreg_map[vreg].GetStackOffsetInBytes();
           const uint8_t* addr = reinterpret_cast<const uint8_t*>(GetCurrentQuickFrame()) + offset;
-          value = *reinterpret_cast<const uint32_t*>(addr);
+          // The stack mask marks a reference at bit offset/kVRegSize (it indexes 4-byte slots), but
+          // the reference stored there is a full 8-byte StackReference.
           uint32_t bit = (offset >> 2);
           if (bit < stack_mask.size_in_bits() && stack_mask.LoadBit(bit)) {
             is_reference = true;
+            ref = reinterpret_cast<const StackReference<mirror::Object>*>(addr)->AsMirrorPtr();
+          } else {
+            value = *reinterpret_cast<const uint32_t*>(addr);
           }
           break;
         }
@@ -634,20 +646,27 @@ class DeoptimizeStackVisitor final : public StackVisitor {
         case DexRegisterLocation::Kind::kInFpuRegister:
         case DexRegisterLocation::Kind::kInFpuRegisterHigh: {
           uint32_t reg = vreg_map[vreg].GetMachineRegister();
-          bool result = GetRegisterIfAccessible(reg, location, &value);
-          CHECK(result);
-          if (location == DexRegisterLocation::Kind::kInRegister) {
-            if (((1u << reg) & register_mask) != 0) {
-              is_reference = true;
-            }
+          if (location == DexRegisterLocation::Kind::kInRegister &&
+              (((1u << reg) & register_mask) != 0)) {
+            is_reference = true;
+            // Read the GP register at full pointer width. GetRegisterIfAccessible truncates to the
+            // low 32 bits on 64-bit targets (its out-param is uint32_t), which would lose the high
+            // bits of a >4 GiB reference; GetGPRAddress gives the full 8-byte register slot.
+            uintptr_t* reg_addr = GetGPRAddress(reg);
+            CHECK(reg_addr != nullptr);
+            ref = *reinterpret_cast<mirror::Object**>(reg_addr);
+          } else {
+            bool result = GetRegisterIfAccessible(reg, location, &value);
+            CHECK(result);
           }
           break;
         }
         case DexRegisterLocation::Kind::kConstant: {
           value = vreg_map[vreg].GetConstant();
           if (value == 0) {
-            // Make it a reference for extra safety.
+            // Make it a reference for extra safety. A constant reference can only be null.
             is_reference = true;
+            ref = nullptr;
           }
           break;
         }
@@ -660,7 +679,7 @@ class DeoptimizeStackVisitor final : public StackVisitor {
         }
       }
       if (is_reference) {
-        new_frame->SetVRegReference(vreg, reinterpret_cast<mirror::Object*>(value));
+        new_frame->SetVRegReference(vreg, ref);
       } else {
         new_frame->SetVReg(vreg, value);
       }

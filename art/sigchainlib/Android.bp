@@ -112,3 +112,18 @@ art_cc_test {
         "art_sigchain_tests_defaults",
     ],
 }
+
+// art-host fork: real sigchain for the fully static host dalvikvm
+// (dalvikvms). ART_SIGCHAIN_STATIC_LIBC binds the next-handler lookups
+// directly to musl internals instead of dlopen("libc_musl.so").
+cc_library_static {
+    name: "libsigchain_static_musl",
+    defaults: ["art_defaults"],
+    visibility: ["//art/dalvikvm"],
+    device_supported: false,
+    host_supported: true,
+    srcs: ["sigchain.cc"],
+    cflags: ["-DART_SIGCHAIN_STATIC_LIBC"],
+    header_libs: ["jni_headers"],
+    export_include_dirs: ["."],
+}

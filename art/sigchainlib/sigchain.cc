@@ -131,7 +131,7 @@ static decltype(&sigprocmask64) linked_sigprocmask64;
 #endif
 
 template <typename T>
-static void lookup_libc_symbol(T* output, T wrapper, const char* name) {
+[[maybe_unused]] static void lookup_libc_symbol(T* output, T wrapper, const char* name) {
 #if defined(__BIONIC__)
   constexpr const char* libc_name = "libc.so";
 #elif defined(__GLIBC__)
@@ -163,6 +163,30 @@ static void lookup_libc_symbol(T* output, T wrapper, const char* name) {
   *output = reinterpret_cast<T>(sym);
 }
 
+#if defined(ART_SIGCHAIN_STATIC_LIBC)
+// art-host fork: in fully static binaries (dalvikvms) there is no dlopen.
+// Bind the "next" libc implementations directly: musl's real sigaction is
+// __sigaction (sigaction is its weak alias, which our strong interposer
+// shadows), and musl's sigprocmask is a trivial pthread_sigmask wrapper.
+extern "C" int __sigaction(int, const struct sigaction*, struct sigaction*);
+
+static int static_libc_sigprocmask(int how, const sigset_t* set, sigset_t* old) {
+  int r = pthread_sigmask(how, set, old);
+  if (r == 0) {
+    return 0;
+  }
+  errno = r;
+  return -1;
+}
+
+__attribute__((constructor)) static void InitializeSignalChain() {
+  static std::once_flag once;
+  std::call_once(once, []() {
+    linked_sigaction = __sigaction;
+    linked_sigprocmask = static_libc_sigprocmask;
+  });
+}
+#else
 __attribute__((constructor)) static void InitializeSignalChain() {
   static std::once_flag once;
   std::call_once(once, []() {
@@ -175,6 +199,7 @@ __attribute__((constructor)) static void InitializeSignalChain() {
 #endif
   });
 }
+#endif
 
 template <typename T>
 static constexpr bool IsPowerOfTwo(T x) {

@@ -1309,7 +1309,7 @@ void CodeGeneratorRISCV64::GenerateGcRootFieldLoad(HInstruction* instruction,
           sizeof(mirror::CompressedReference<mirror::Object>) == sizeof(GcRoot<mirror::Object>),
           "art::mirror::CompressedReference<mirror::Object> and art::GcRoot<mirror::Object> "
           "have different sizes.");
-      static_assert(sizeof(mirror::CompressedReference<mirror::Object>) == sizeof(int32_t),
+      static_assert(sizeof(mirror::CompressedReference<mirror::Object>) == kHeapReferenceSize,
                     "art::mirror::CompressedReference<mirror::Object> and int32_t "
                     "have different sizes.");
 
@@ -2835,7 +2835,7 @@ void InstructionCodeGeneratorRISCV64::VisitArrayGet(HArrayGet* instruction) {
 
   if (type == DataType::Type::kReference && codegen_->EmitBakerReadBarrier()) {
     static_assert(
-        sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
+        sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,
         "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
     // /* HeapReference<Object> */ out =
     //     *(obj + data_offset + index * sizeof(HeapReference<Object>))

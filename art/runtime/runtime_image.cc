@@ -1280,7 +1280,7 @@ class RuntimeImageHelper {
     size_t size = num_entries * sizeof(GcRoot<T>);
     // We need to reserve space to store `num_entries` because ImageSpace doesn't have
     // access to the dex files when relocating dex caches.
-    static_assert(sizeof(GcRoot<T>) == sizeof(uint32_t));
+    static_assert(sizeof(GcRoot<T>) == kHeapReferenceSize);
     size_t offset = data.size() + sizeof(uint32_t);
     data.resize(data.size() + sizeof(uint32_t) + size);
     reinterpret_cast<uint32_t*>(data.data() + offset)[-1] = num_entries;

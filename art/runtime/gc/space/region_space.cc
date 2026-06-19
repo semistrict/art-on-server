@@ -49,7 +49,8 @@ static constexpr bool kCheckLiveBytesAgainstRegionBitmap = kIsDebugBuild;
 
 MemMap RegionSpace::CreateMemMap(const std::string& name,
                                  size_t capacity,
-                                 uint8_t* requested_begin) {
+                                 uint8_t* requested_begin,
+                                 MemMap* reservation) {
   CHECK_ALIGNED(capacity, kRegionSize);
   std::string error_msg;
   // Ask for the capacity of an additional kRegionSize so that we can align the map by kRegionSize
@@ -57,14 +58,20 @@ MemMap RegionSpace::CreateMemMap(const std::string& name,
   MemMap mem_map;
   while (true) {
     mem_map = MemMap::MapAnonymous(name.c_str(),
-                                   requested_begin,
+                                   // When carving from a reservation the map must start at the
+                                   // reservation's current begin; otherwise honour the hint.
+                                   reservation != nullptr ? reservation->Begin() : requested_begin,
                                    capacity + kRegionSize,
                                    PROT_READ | PROT_WRITE,
-                                   /*low_4gb=*/ true,
+                                   // art-host fork (large heap): the region space (main space for
+                                   // CC/CMC) holds the bulk of the heap. With native pointer-width
+                                   // references it need not live in the low 4 GiB, which is what
+                                   // lets -Xmx exceed 4 GiB.
+                                   /*low_4gb=*/ false,
                                    /*reuse=*/ false,
-                                   /*reservation=*/ nullptr,
+                                   reservation,
                                    &error_msg);
-    if (mem_map.IsValid() || requested_begin == nullptr) {
+    if (mem_map.IsValid() || requested_begin == nullptr || reservation != nullptr) {
       break;
     }
     // Retry with no specified request begin.

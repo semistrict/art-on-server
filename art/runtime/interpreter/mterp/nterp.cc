@@ -35,26 +35,14 @@ namespace art HIDDEN {
 namespace interpreter {
 
 bool IsNterpSupported() {
-#ifdef ART_USE_RESTRICTED_MODE
-  // TODO(Simulator): Support Nterp.
-  // Nterp uses the native stack and quick stack frame layout; this will be a complication
-  // for the simulator mode. We should use switch interpreter only for now.
+  // art-host fork (large heap): nterp's arm64 assembly still loads/stores object
+  // references at 4-byte width (GET_VREG_OBJECT, iget/iput-object, array refs,
+  // invoke arg shuffling), which truncates references above 4 GiB. Until that asm
+  // is ported to native pointer width, disable nterp so cold code runs in the
+  // (8-byte-correct) switch interpreter and hot code is JIT-compiled. The JIT
+  // codegen derives its reference load/store width from kObjectReferenceSize (=8),
+  // so it is large-heap-correct. TODO: port mterp/arm64ng/*.S and re-enable.
   return false;
-#else
-  switch (kRuntimeQuickCodeISA) {
-    case InstructionSet::kArm:
-    case InstructionSet::kThumb2:
-    case InstructionSet::kArm64:
-      return kReserveMarkingRegister && !kUseTableLookupReadBarrier;
-    case InstructionSet::kRiscv64:
-      return true;
-    case InstructionSet::kX86:
-    case InstructionSet::kX86_64:
-      return !kUseTableLookupReadBarrier;
-    default:
-      return false;
-  }
-#endif  // #ifdef ART_USE_RESTRICTED_MODE
 }
 
 bool CanRuntimeUseNterp() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -408,7 +396,9 @@ template <bool kStatic>
 ALWAYS_INLINE FLATTEN
 static ArtField* FindFieldFast(ArtMethod* caller,
                                uint16_t field_index,
-                               uint32_t* registers,
+                               // art-host fork (large heap): the receiver fast-path that used this
+                               // was removed (it truncated >4GiB references); see below.
+                               [[maybe_unused]] uint32_t* registers,
                                const Instruction* inst)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (caller->IsObsolete()) {
@@ -422,19 +412,14 @@ static ArtField* FindFieldFast(ArtMethod* caller,
     return cls->FindDeclaredField(field_index);
   }
 
-  if (!kStatic) {
-    mirror::Object* obj = reinterpret_cast32<mirror::Object*>(registers[inst->VRegB_22c()]);
-    if (obj != nullptr) {
-      mirror::Class* obj_cls = obj->GetClass();
-      if (obj_cls->GetDexTypeIndex() == field_id.class_idx_ &&
-          obj_cls->GetDexCache() == cls->GetDexCache()) {
-        ArtField* resolved_field = obj_cls->FindDeclaredField(field_index);
-        if (CanAccessFast<kStatic>(resolved_field, caller, inst)) {
-          return resolved_field;
-        }
-      }
-    }
-  }
+  // art-host fork (large heap): the receiver fast-path here read the object as
+  // `reinterpret_cast32<mirror::Object*>(registers[VRegB])` — a 32-bit-truncating
+  // read of the 4-byte vreg value slot. With native-pointer-width references the
+  // switch interpreter passes the value region (GetVRegAddr(0)), whose reference
+  // slots only hold the low 32 bits, so a receiver above 4 GiB was truncated and
+  // dereferenced -> SIGSEGV. Drop this optimization (the dex-cache path below
+  // resolves the same field, falling back to FindFieldSlow on a miss). When nterp
+  // is ported to 8-byte frame references this can be restored with an 8-byte read.
 
   ArtField* field = caller->GetDexCache()->GetResolvedField(field_index);
   if (CanAccessFast<kStatic>(field, caller, inst)) {
@@ -798,8 +783,16 @@ extern "C" jit::OsrData* NterpHotMethod(ArtMethod* method, uint16_t* dex_pc_ptr,
       // This could be a loop back edge, check if we can OSR.
       CodeItemInstructionAccessor accessor(method->DexInstructions());
       uint32_t dex_pc = dex_pc_ptr - accessor.Insns();
+      // nterp is disabled in this fork (IsNterpSupported() == false), so this OSR path is dead
+      // code. nterp has no ShadowFrame; pass null. PrepareForOsr then keeps the legacy 4-byte
+      // transfer (matching nterp's own 4-byte reference storage). When nterp is ported to
+      // native-width references this must pass nterp's reference array so references transfer at
+      // full width, mirroring the switch-interpreter ShadowFrame path.
       jit::OsrData* osr_data = jit->PrepareForOsr(
-          method->GetInterfaceMethodIfProxy(kRuntimePointerSize), dex_pc, vregs);
+          method->GetInterfaceMethodIfProxy(kRuntimePointerSize),
+          dex_pc,
+          vregs,
+          /* shadow_frame= */ nullptr);
       if (osr_data != nullptr) {
         return osr_data;
       }

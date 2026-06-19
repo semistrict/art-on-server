@@ -691,10 +691,13 @@ inline bool Object::CasFieldObjectWithoutWriteBarrier(MemberOffset field_offset,
                                                       std::memory_order memory_order) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
   VerifyCAS<kVerifyFlags>(new_value, old_value);
-  uint32_t old_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(old_value));
-  uint32_t new_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(new_value));
+  // art-host fork (large heap): a heap reference is native pointer width, so the
+  // CAS must be over the full 8-byte field. A 4-byte Atomic here would operate on
+  // half the reference and splice an adjacent word into the high 32 bits.
+  uintptr_t old_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(old_value));
+  uintptr_t new_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(new_value));
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
-  Atomic<uint32_t>* atomic_addr = reinterpret_cast<Atomic<uint32_t>*>(raw_addr);
+  Atomic<uintptr_t>* atomic_addr = reinterpret_cast<Atomic<uintptr_t>*>(raw_addr);
   bool success = atomic_addr->CompareAndSet(old_ref, new_ref, mode, memory_order);
   if (kTransactionActive && success) {
     Runtime::Current()->GetClassLinker()->RecordWriteFieldReference(
@@ -727,10 +730,11 @@ inline ObjPtr<Object> Object::CompareAndExchangeFieldObject(MemberOffset field_o
                                                             ObjPtr<Object> new_value) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
   VerifyCAS<kVerifyFlags>(new_value, old_value);
-  uint32_t old_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(old_value));
-  uint32_t new_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(new_value));
+  // art-host fork (large heap): full 8-byte reference CAS (see above).
+  uintptr_t old_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(old_value));
+  uintptr_t new_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(new_value));
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
-  Atomic<uint32_t>* atomic_addr = reinterpret_cast<Atomic<uint32_t>*>(raw_addr);
+  Atomic<uintptr_t>* atomic_addr = reinterpret_cast<Atomic<uintptr_t>*>(raw_addr);
   bool success = atomic_addr->compare_exchange_strong(old_ref, new_ref, std::memory_order_seq_cst);
   ObjPtr<Object> witness_value(PtrCompression<kPoisonHeapReferences, Object>::Decompress(old_ref));
   if (kIsDebugBuild) {
@@ -754,10 +758,11 @@ inline ObjPtr<Object> Object::ExchangeFieldObject(MemberOffset field_offset,
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
   VerifyCAS<kVerifyFlags>(new_value, /*old_value=*/ nullptr);
 
-  uint32_t new_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(new_value));
+  // art-host fork (large heap): full 8-byte reference exchange (see above).
+  uintptr_t new_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(new_value));
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
-  Atomic<uint32_t>* atomic_addr = reinterpret_cast<Atomic<uint32_t>*>(raw_addr);
-  uint32_t old_ref = atomic_addr->exchange(new_ref, std::memory_order_seq_cst);
+  Atomic<uintptr_t>* atomic_addr = reinterpret_cast<Atomic<uintptr_t>*>(raw_addr);
+  uintptr_t old_ref = atomic_addr->exchange(new_ref, std::memory_order_seq_cst);
   ObjPtr<Object> old_value(PtrCompression<kPoisonHeapReferences, Object>::Decompress(old_ref));
   if (kIsDebugBuild) {
     // Ensure caller has done read barrier on the reference field so it's in the to-space.

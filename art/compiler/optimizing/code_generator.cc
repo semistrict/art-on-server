@@ -86,7 +86,10 @@ static bool CheckType(DataType::Type type, Location location) {
            || (type == DataType::Type::kFloat32)
            || (type == DataType::Type::kReference);
   } else if (location.IsDoubleStackSlot()) {
-    return (type == DataType::Type::kInt64) || (type == DataType::Type::kFloat64);
+    // art-host fork (large heap): a native 8-byte reference spills to a DoubleStackSlot (8 bytes),
+    // so it is valid here as well as in a single StackSlot (managed-convention stack arg).
+    return (type == DataType::Type::kInt64) || (type == DataType::Type::kFloat64)
+           || (type == DataType::Type::kReference);
   } else if (location.IsConstant()) {
     if (location.GetConstant()->IsIntConstant()) {
       return DataType::IsIntegralType(type) && (type != DataType::Type::kInt64);
@@ -608,7 +611,11 @@ void CodeGenerator::CreateStringBuilderAppendLocations(HStringBuilderAppend* ins
       case StringBuilderAppend::Argument::kStringBuilder:
       case StringBuilderAppend::Argument::kString:
       case StringBuilderAppend::Argument::kCharArray:
-        static_assert(sizeof(StackReference<mirror::Object>) == sizeof(uint32_t), "Size check.");
+        // art-host fork (large heap): references are native pointer width.
+        // TODO(largeheap): StringBuilderAppend reads this arg as a 32-bit
+        // StackSlot below; widen to a DoubleStackSlot for 8-byte references
+        // when enabling the JIT path. Not exercised under the interpreter.
+        static_assert(sizeof(StackReference<mirror::Object>) == kHeapReferenceSize, "Size check.");
         FALLTHROUGH_INTENDED;
       case StringBuilderAppend::Argument::kBoolean:
       case StringBuilderAppend::Argument::kChar:
@@ -1376,10 +1383,17 @@ void CodeGenerator::EmitVRegInfo(HEnvironment* environment,
 
       case Location::kDoubleStackSlot: {
         stack_map_stream->AddDexRegisterEntry(Kind::kInStack, location.GetStackIndex());
-        stack_map_stream->AddDexRegisterEntry(
-            Kind::kInStack, location.GetHighStackIndex(kVRegSize));
-        ++i;
-        DCHECK_LT(i, environment_size);
+        // art-host fork (large heap): a native 8-byte reference spills to a DoubleStackSlot (8
+        // bytes) yet occupies ONE dex register, unlike a long/double (two). Emit a single
+        // dex-register entry and do not consume the next dex register; otherwise deopt and the GC
+        // read the reference as a 2-register pair and swallow the following dex register, corrupting
+        // the reconstructed interpreter frame.
+        if (current->GetType() != DataType::Type::kReference) {
+          stack_map_stream->AddDexRegisterEntry(
+              Kind::kInStack, location.GetHighStackIndex(kVRegSize));
+          ++i;
+          DCHECK_LT(i, environment_size);
+        }
         break;
       }
 
@@ -1508,10 +1522,15 @@ void CodeGenerator::EmitVRegInfoOnlyCatchPhis(HEnvironment* environment) {
         case Location::kDoubleStackSlot: {
           stack_map_stream->AddDexRegisterEntry(DexRegisterLocation::Kind::kInStack,
                                                 location.GetStackIndex());
-          stack_map_stream->AddDexRegisterEntry(DexRegisterLocation::Kind::kInStack,
-                                                location.GetHighStackIndex(kVRegSize));
-          ++vreg;
-          DCHECK_LT(vreg, environment->Size());
+          // art-host fork (large heap): a native 8-byte reference catch-phi spills to a
+          // DoubleStackSlot but is ONE dex register (see EmitVRegInfo) -- emit a single entry and
+          // do not consume the next vreg.
+          if (current_phi->GetType() != DataType::Type::kReference) {
+            stack_map_stream->AddDexRegisterEntry(DexRegisterLocation::Kind::kInStack,
+                                                  location.GetHighStackIndex(kVRegSize));
+            ++vreg;
+            DCHECK_LT(vreg, environment->Size());
+          }
           break;
         }
         default: {

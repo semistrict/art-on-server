@@ -72,7 +72,16 @@ class Throwable;
 static constexpr bool kCheckFieldAssignments = false;
 
 // Size of Object.
-static constexpr uint32_t kObjectHeaderSize = 8;
+// art-host fork (large heap): the class reference in the header is native
+// pointer width, so the header is kHeapReferenceSize (klass) + 4 (lock word),
+// rounded up to the object alignment so the first instance field (references
+// are laid out first) is 8-aligned for atomic access. With 8-byte references
+// this is 8 + 4 -> 16; with the stock 4-byte references it stays 4 + 4 = 8.
+// The matching tail padding is declared in the Object struct, and the field
+// linker rounds every class's instance size to the object alignment to agree.
+static constexpr uint32_t kObjectHeaderSize =
+    (kHeapReferenceSize + sizeof(uint32_t) + kObjectAlignment - 1) &
+    ~(static_cast<uint32_t>(kObjectAlignment) - 1);
 
 // C++ mirror of java.lang.Object
 class EXPORT MANAGED LOCKABLE Object {
@@ -86,8 +95,11 @@ class EXPORT MANAGED LOCKABLE Object {
   static uint32_t ClassSize(PointerSize pointer_size);
 
   // Size of an instance of java.lang.Object.
+  // art-host fork (large heap): the logical instance size is the object header
+  // (class reference + lock word), not the C++ struct sizeof, which carries
+  // alignment tail padding when the class reference is native pointer width.
   static constexpr uint32_t InstanceSize() {
-    return sizeof(Object);
+    return kObjectHeaderSize;
   }
 
   static constexpr MemberOffset ClassOffset() {
@@ -804,6 +816,11 @@ class EXPORT MANAGED LOCKABLE Object {
   HeapReference<Class> klass_;
   // Monitor and hash code information.
   uint32_t monitor_;
+  // art-host fork (large heap): pad the (packed) header up to kObjectHeaderSize
+  // so a subclass's first field — references are laid out first — starts at an
+  // 8-aligned offset for atomic/volatile access. Sized from the constants, so
+  // it is 4 bytes with native-pointer-width references and empty otherwise.
+  uint8_t header_padding_[kObjectHeaderSize - kHeapReferenceSize - sizeof(uint32_t)];
 
   class DumpRefsVisitor;
 

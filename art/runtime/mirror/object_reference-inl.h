@@ -25,7 +25,8 @@ namespace art HIDDEN {
 namespace mirror {
 
 template<bool kPoisonReferences, class MirrorType>
-inline uint32_t PtrCompression<kPoisonReferences, MirrorType>::Compress(ObjPtr<MirrorType> ptr) {
+inline typename PtrCompression<kPoisonReferences, MirrorType>::EncodedReference
+PtrCompression<kPoisonReferences, MirrorType>::Compress(ObjPtr<MirrorType> ptr) {
   return Compress(ptr.Ptr());
 }
 

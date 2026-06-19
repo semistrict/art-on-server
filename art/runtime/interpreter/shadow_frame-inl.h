@@ -31,9 +31,15 @@ inline void ShadowFrame::SetVRegReference(size_t i, ObjPtr<mirror::Object> val)
     VerifyObject(val);
   }
   ReadBarrier::MaybeAssertToSpaceInvariant(val.Ptr());
-  uint32_t* vreg = &vregs_[i];
-  reinterpret_cast<StackReference<mirror::Object>*>(vreg)->Assign(val);
+  // art-host fork (large heap): the authoritative reference is the native-
+  // pointer-width entry in the References() side array. The per-vreg value
+  // slot is only 4 bytes, so it cannot hold an 8-byte reference; mirror the
+  // 32-bit summary (CompressedReference::AsVRegValue, the low bits) there for
+  // fast null checks and the raw-reg-equals-reference consistency check.
+  // Writing the full StackReference into &vregs_[i] would overflow the value
+  // slot and corrupt the adjacent vreg.
   References()[i].Assign(val);
+  vregs_[i] = References()[i].AsVRegValue();
 }
 
 }  // namespace art

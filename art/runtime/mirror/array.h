@@ -36,7 +36,12 @@ namespace mirror {
 
 class MANAGED Array : public Object {
  public:
-  static constexpr size_t kFirstElementOffset = 12u;
+  // art-host fork (large heap): the object header is a native-pointer-width
+  // class reference plus the lock word, followed by the 4-byte array length,
+  // so the first element starts at kObjectHeaderSize + 4 (16 with 64-bit
+  // references, 12 with the stock 32-bit ones). Must equal
+  // OFFSETOF_MEMBER(Array, first_element_), which Runtime::Runtime() checks.
+  static constexpr size_t kFirstElementOffset = kObjectHeaderSize + sizeof(int32_t);
 
   // The size of a java.lang.Class representing an array.
   static uint32_t ClassSize(PointerSize pointer_size);

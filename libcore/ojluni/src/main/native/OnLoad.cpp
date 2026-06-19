@@ -64,7 +64,9 @@ extern "C" void register_java_util_zip_Adler32(JNIEnv* env);
 extern "C" void register_java_sun_nio_fs_UnixNativeDispatcher(JNIEnv* env);
 extern "C" void register_java_sun_nio_ch_PollArrayWrapper(JNIEnv* env);
 
-extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
+// art-host fork: real implementation under a per-library name; see
+// libcore/luni Register.cpp for rationale.
+extern "C" JNIEXPORT jint JNI_OnLoad_openjdk(JavaVM* vm, void*) {
   jint version = JNI_VERSION_1_6;
   void* raw_env;
   jint result = vm->GetEnv(&raw_env, version);
@@ -139,4 +141,8 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
 
   env->PopLocalFrame(/* result */ nullptr);  // Pop the local frame.
   return version;
+}
+
+extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
+  return JNI_OnLoad_openjdk(vm, reserved);
 }

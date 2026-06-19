@@ -108,6 +108,95 @@ cc_library_shared {
     },
 }
 
+// art-host fork: static variants of the boot JNI libraries for the fully
+// static host dalvikvm (dalvikvms). Dependencies are re-expressed as
+// static libs; JNI_OnLoad is reached via the per-library alias exported
+// from Register.cpp / OnLoad.cpp.
+cc_library_static {
+    name: "libandroidio_static",
+    visibility: [
+        "//art/dalvikvm",
+        "//external/conscrypt",
+    ],
+    defaults: ["core_native_default_flags"],
+    device_supported: false,
+    host_supported: true,
+    srcs: [":libandroidio_srcs"],
+    static_libs: ["liblog"],
+}
+
+cc_library_static {
+    name: "libjavacore_static",
+    visibility: ["//art/dalvikvm"],
+    defaults: ["core_native_default_flags"],
+    device_supported: false,
+    host_supported: true,
+    srcs: [":luni_native_srcs"],
+    header_libs: ["jni_headers"],
+    static_libs: [
+        "libandroidio_static",
+        "libbase",
+        "libcrypto_static", // Not FIPS tested - for bignums only.
+        "libexpat",
+        "libicu_static",
+        "libicui18n",
+        "libicuuc",
+        "liblog",
+        "libnativehelper_static_noinvocation",
+        "libz",
+        "libziparchive",
+    ],
+}
+
+cc_library_static {
+    name: "libopenjdk_static",
+    visibility: ["//art/dalvikvm"],
+    defaults: ["core_native_default_flags"],
+    device_supported: false,
+    host_supported: true,
+    srcs: [":libopenjdk_native_srcs"],
+    local_include_dirs: [
+        "luni/src/main/native",
+    ],
+    header_libs: ["jni_headers"],
+    cflags: [
+        "-Wno-unused-parameter",
+        "-Wno-unused-variable",
+        "-Wno-parentheses-equality",
+        "-Wno-constant-logical-operand",
+        "-Wno-sometimes-uninitialized",
+    ],
+    static_libs: [
+        "libandroidio_static",
+        "libbase",
+        "libcrypto_static", // Not FIPS tested - for bignums only.
+        "libfdlibm",
+        "libicu_static",
+        "libicui18n",
+        "libicuuc",
+        "liblog",
+        "libnativehelper_static_noinvocation",
+        "libz",
+    ],
+    target: {
+        musl: {
+            cflags: [
+                "-D_LARGEFILE64_SOURCE",
+                "-D_GNU_SOURCE",
+                "-DLINUX",
+            ],
+        },
+        glibc: {
+            cflags: [
+                "-D__GLIBC__",
+                "-D_LARGEFILE64_SOURCE",
+                "-D_GNU_SOURCE",
+                "-DLINUX",
+            ],
+        },
+    },
+}
+
 cc_defaults {
     name: "libopenjdk_native_defaults",
     defaults: [

@@ -25,7 +25,13 @@
 #include "JniConstants.h"
 
 // DalvikVM calls this on startup, so we can statically register all our native methods.
-jint JNI_OnLoad(JavaVM* vm, void*) {
+// art-host fork: the real implementation carries a per-library name so the
+// static dalvikvm (dalvikvms) can dispatch it without dlopen (in a static
+// link all references to the colliding JNI_OnLoad symbols bind to the first
+// definition; see art java_vm_ext.cc). NOT extern "C": the REGISTER macro
+// declares the register_* functions inside the body, and they must keep
+// C++ linkage.
+static jint JNI_OnLoad_javacore_impl(JavaVM* vm, void*) {
     JNIEnv* env;
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
         ALOGE("JavaVM::GetEnv() failed");
@@ -64,4 +70,12 @@ void JNI_OnUnload(JavaVM*, void*) {
 #undef UNREGISTER
     JniConstants::Invalidate();
     jniUninitializeConstants();
+}
+
+extern "C" jint JNI_OnLoad_javacore(JavaVM* vm, void* reserved) {
+    return JNI_OnLoad_javacore_impl(vm, reserved);
+}
+
+extern "C" jint JNI_OnLoad(JavaVM* vm, void* reserved) {
+    return JNI_OnLoad_javacore(vm, reserved);
 }

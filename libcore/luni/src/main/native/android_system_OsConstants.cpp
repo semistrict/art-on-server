@@ -34,6 +34,12 @@
 #include <sys/capability.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#if defined(ANDROID_HOST_MUSL)
+// musl's sys/mman.h lacks newer MADV_* constants (MADV_COLLAPSE,
+// MADV_POPULATE_*); take them from the kernel uapi header. The overlapping
+// macros are identical, so the redefinitions are benign.
+#include <linux/mman.h>
+#endif
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -544,7 +550,10 @@ static void OsConstants_initConstants(JNIEnv* env, jclass c) {
     initConstant(env, c, "_SC_2_CHAR_TERM", _SC_2_CHAR_TERM);
     initConstant(env, c, "_SC_2_C_BIND", _SC_2_C_BIND);
     initConstant(env, c, "_SC_2_C_DEV", _SC_2_C_DEV);
+#if defined(_SC_2_C_VERSION)
+    // removed in POSIX.1-2001; musl does not define it
     initConstant(env, c, "_SC_2_C_VERSION", _SC_2_C_VERSION);
+#endif
     initConstant(env, c, "_SC_2_FORT_DEV", _SC_2_FORT_DEV);
     initConstant(env, c, "_SC_2_FORT_RUN", _SC_2_FORT_RUN);
     initConstant(env, c, "_SC_2_LOCALEDEF", _SC_2_LOCALEDEF);

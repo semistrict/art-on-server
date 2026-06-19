@@ -133,7 +133,11 @@ function get_host_prebuilt_prefix
 {
   local un=$(uname)
   if [[ $un == "Linux" ]] ; then
-    echo linux-x86
+    if [[ $(uname -m) == "aarch64" ]] ; then
+      echo linux-arm64
+    else
+      echo linux-x86
+    fi
   elif [[ $un == "Darwin" ]] ; then
     echo darwin-x86
   else

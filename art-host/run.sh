@@ -32,5 +32,6 @@ run_in_vm test/81-jit-largeheap.sh
 run_in_vm test/82-jit-intrinsics.sh
 run_in_vm test/83-jit-gcroots.sh
 run_in_vm test/84-jit-deopt.sh
+run_in_vm test/85-jit-osr.sh
 
 echo "art-host run: OK"

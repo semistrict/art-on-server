@@ -2249,7 +2249,7 @@ index 59caaed43c..df579cbb61 100644
                  "Object header size does not match");
    // Memcpy can tear for words since it may do byte copy. It is only safe to do this since the
 diff --git a/runtime/gc/collector/mark_compact.cc b/runtime/gc/collector/mark_compact.cc
-index 9e98d7e8b2..e8df7a6464 100644
+index 9e98d7e8b2..2a4ac78571 100644
 --- a/runtime/gc/collector/mark_compact.cc
 +++ b/runtime/gc/collector/mark_compact.cc
 @@ -426,28 +426,33 @@ size_t MarkCompact::ComputeInfoMapSize() {
@@ -2388,7 +2388,21 @@ index 9e98d7e8b2..e8df7a6464 100644
          word &= ~kMask;
          VisitRootIfNonNull(reinterpret_cast<mirror::CompressedReference<mirror::Object>*>(&word));
          *root_ptr = word | lsbs;
-@@ -3649,7 +3662,7 @@ void MarkCompact::ConcurrentlyProcessMovingPage(uint8_t* fault_page,
+@@ -3451,7 +3464,12 @@ void MarkCompact::CompactionPause() {
+   if (uffd_ == kFallbackMode) {
+     CompactMovingSpace<kFallbackMode>(nullptr);
+ 
+-    int32_t freed_bytes = black_objs_slide_diff_;
++    // art-host fork (large heap): black_objs_slide_diff_ is the moving-space bytes reclaimed by
++    // sliding compaction (black_allocations_begin_ - post_compact_end_). At a >2 GiB moving space
++    // this exceeds INT32_MAX, so a 32-bit `freed_bytes` would overflow to a negative/garbage value
++    // and underflow num_bytes_allocated_ (heap then reports it is full -> spurious OutOfMemoryError
++    // and the bogus "freed 17179869183GB" GC log). Keep it full width.
++    int64_t freed_bytes = black_objs_slide_diff_;
+     bump_pointer_space_->RecordFree(freed_objects_, freed_bytes);
+     RecordFree(ObjectBytePair(freed_objects_, freed_bytes));
+   } else {
+@@ -3649,7 +3667,7 @@ void MarkCompact::ConcurrentlyProcessMovingPage(uint8_t* fault_page,
      size_t end_idx = page_idx + DivideByPageSize(end - fault_page);
      size_t length = 0;
      for (size_t idx = page_idx; idx < end_idx; idx++, length += gPageSize) {
@@ -2397,7 +2411,7 @@ index 9e98d7e8b2..e8df7a6464 100644
        if (cur_state != static_cast<uint8_t>(PageState::kUnprocessed)) {
          DCHECK_EQ(cur_state, static_cast<uint8_t>(PageState::kProcessedAndMapped));
          break;
-@@ -3665,7 +3678,7 @@ void MarkCompact::ConcurrentlyProcessMovingPage(uint8_t* fault_page,
+@@ -3665,7 +3683,7 @@ void MarkCompact::ConcurrentlyProcessMovingPage(uint8_t* fault_page,
      return;
    }
  
@@ -2406,6 +2420,19 @@ index 9e98d7e8b2..e8df7a6464 100644
    uint32_t backoff_count = 0;
    PageState state;
    while (true) {
+@@ -4137,7 +4155,11 @@ void MarkCompact::UnregisterUffd(uint8_t* start, size_t len) {
+ void MarkCompact::CompactionPhase() {
+   TimingLogger::ScopedTiming t(__FUNCTION__, GetTimings());
+   {
+-    int32_t freed_bytes = black_objs_slide_diff_;
++    // art-host fork (large heap): see CompactMovingSpace's fallback path. black_objs_slide_diff_
++    // (moving-space bytes reclaimed by compaction) exceeds INT32_MAX at a >2 GiB moving space, so a
++    // 32-bit `freed_bytes` would overflow negative and underflow num_bytes_allocated_, causing
++    // spurious OOM. Keep it full width.
++    int64_t freed_bytes = black_objs_slide_diff_;
+     bump_pointer_space_->RecordFree(freed_objects_, freed_bytes);
+     RecordFree(ObjectBytePair(freed_objects_, freed_bytes));
+   }
 diff --git a/runtime/gc/collector/mark_compact.h b/runtime/gc/collector/mark_compact.h
 index 717ac5fe76..55e531d584 100644
 --- a/runtime/gc/collector/mark_compact.h
@@ -2672,6 +2699,36 @@ index dee86de3d1..0b68da879b 100644
                                        /*reuse=*/ false,
                                        /*reservation=*/ nullptr,
                                        out_error_str);
+diff --git a/runtime/gc/space/bump_pointer_space.h b/runtime/gc/space/bump_pointer_space.h
+index 7dad977c44..43ab6d5705 100644
+--- a/runtime/gc/space/bump_pointer_space.h
++++ b/runtime/gc/space/bump_pointer_space.h
+@@ -157,7 +157,11 @@ class EXPORT BumpPointerSpace final : public ContinuousMemMapAllocSpace {
+   accounting::ContinuousSpaceBitmap::SweepCallback* GetSweepCallback() override;
+ 
+   // Record objects / bytes freed.
+-  void RecordFree(int32_t objects, int32_t bytes) {
++  // art-host fork (large heap): `bytes` is full width (int64_t). The moving-space bytes reclaimed
++  // by a single compaction exceeds INT32_MAX once the moving space is larger than 2 GiB, so a
++  // 32-bit parameter (and a 32-bit bytes_allocated_ counter) would truncate/overflow and corrupt
++  // the heap's num_bytes_allocated_ accounting (spurious OOM).
++  void RecordFree(int32_t objects, int64_t bytes) {
+     objects_allocated_.fetch_sub(objects, std::memory_order_relaxed);
+     bytes_allocated_.fetch_sub(bytes, std::memory_order_relaxed);
+   }
+@@ -182,7 +186,11 @@ class EXPORT BumpPointerSpace final : public ContinuousMemMapAllocSpace {
+ 
+   uint8_t* growth_end_;
+   AtomicInteger objects_allocated_;  // Accumulated from revoked thread local regions.
+-  AtomicInteger bytes_allocated_;  // Accumulated from revoked thread local regions.
++  // art-host fork (large heap): full-width (64-bit) byte counter. It accumulates revoked TLAB
++  // bytes (size_t) and is decremented by RecordFree with the moving-space compaction reclaim, both
++  // of which exceed INT32_MAX at multi-GiB heaps. A 32-bit counter overflowed and corrupted the
++  // heap's num_bytes_allocated_ accounting, producing spurious OutOfMemoryError.
++  Atomic<int64_t> bytes_allocated_;  // Accumulated from revoked thread local regions.
+   Mutex lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
+   // The objects at the start of the space are stored in the main block.
+   size_t main_block_size_ GUARDED_BY(lock_);
 diff --git a/runtime/gc/space/image_space.cc b/runtime/gc/space/image_space.cc
 index f557f3c8a9..de9fc9372f 100644
 --- a/runtime/gc/space/image_space.cc
@@ -2945,7 +3002,7 @@ index 5deb0e1881..d07646c8e0 100644
  
  void SetStringInitValueToAllAliases(ShadowFrame* shadow_frame,
 diff --git a/runtime/interpreter/mterp/nterp.cc b/runtime/interpreter/mterp/nterp.cc
-index 38c604432b..3dfcaab7c5 100644
+index 38c604432b..401662570d 100644
 --- a/runtime/interpreter/mterp/nterp.cc
 +++ b/runtime/interpreter/mterp/nterp.cc
 @@ -35,26 +35,14 @@ namespace art HIDDEN {
@@ -3021,6 +3078,24 @@ index 38c604432b..3dfcaab7c5 100644
  
    ArtField* field = caller->GetDexCache()->GetResolvedField(field_index);
    if (CanAccessFast<kStatic>(field, caller, inst)) {
+@@ -798,8 +783,16 @@ extern "C" jit::OsrData* NterpHotMethod(ArtMethod* method, uint16_t* dex_pc_ptr,
+       // This could be a loop back edge, check if we can OSR.
+       CodeItemInstructionAccessor accessor(method->DexInstructions());
+       uint32_t dex_pc = dex_pc_ptr - accessor.Insns();
++      // nterp is disabled in this fork (IsNterpSupported() == false), so this OSR path is dead
++      // code. nterp has no ShadowFrame; pass null. PrepareForOsr then keeps the legacy 4-byte
++      // transfer (matching nterp's own 4-byte reference storage). When nterp is ported to
++      // native-width references this must pass nterp's reference array so references transfer at
++      // full width, mirroring the switch-interpreter ShadowFrame path.
+       jit::OsrData* osr_data = jit->PrepareForOsr(
+-          method->GetInterfaceMethodIfProxy(kRuntimePointerSize), dex_pc, vregs);
++          method->GetInterfaceMethodIfProxy(kRuntimePointerSize),
++          dex_pc,
++          vregs,
++          /* shadow_frame= */ nullptr);
+       if (osr_data != nullptr) {
+         return osr_data;
+       }
 diff --git a/runtime/interpreter/shadow_frame-inl.h b/runtime/interpreter/shadow_frame-inl.h
 index a05d60f59b..2caa498e16 100644
 --- a/runtime/interpreter/shadow_frame-inl.h
@@ -3044,24 +3119,141 @@ index a05d60f59b..2caa498e16 100644
  
  }  // namespace art
 diff --git a/runtime/jit/jit.cc b/runtime/jit/jit.cc
-index a399cafcf4..25c138e346 100644
+index a399cafcf4..2aae854294 100644
 --- a/runtime/jit/jit.cc
 +++ b/runtime/jit/jit.cc
-@@ -64,7 +64,13 @@ using android::base::unique_fd;
+@@ -52,10 +52,13 @@
+ #include "profile/profile_boot_info.h"
+ #include "profile/profile_compilation_info.h"
+ #include "profile_saver.h"
++#include "interpreter/shadow_frame.h"
+ #include "runtime.h"
++#include "runtime_globals.h"
+ #include "runtime_options.h"
+ #include "small_pattern_matcher.h"
+ #include "stack.h"
++#include "stack_reference.h"
+ #include "thread-inl.h"
+ #include "thread_list.h"
+ 
+@@ -64,6 +67,13 @@ using android::base::unique_fd;
  namespace art HIDDEN {
  namespace jit {
  
--static constexpr bool kEnableOnStackReplacement = true;
-+// art-host fork (large heap): the OSR transition (art_quick_osr_stub / the OSR
-+// vreg-transfer that copies interpreter registers into the JITed frame) still
-+// moves object references at 4-byte width, truncating references above 4 GiB and
-+// crashing even at <4 GiB with the 8-byte object model. Disable OSR until the OSR
-+// vreg transfer is ported; hot methods are still JIT-compiled and entered on the
-+// next call (just not mid-loop). TODO: port the OSR reference transfer.
-+static constexpr bool kEnableOnStackReplacement = false;
++// art-host fork (large heap): OSR is enabled. The OSR vreg transfer in
++// Jit::PrepareForOsr now copies object references at full pointer width (8 bytes) from the
++// interpreter shadow frame into the JITed frame, using the OSR stack map's reference mask to
++// distinguish reference slots from primitives (see PrepareForOsr). Without this, a reference vreg
++// was truncated to its low 32 bits, producing a garbage pointer above 4 GiB (and even at <=4 GiB
++// the 8-byte slot would be left half-uninitialized). Long-running loops now switch from the switch
++// interpreter into compiled code mid-loop.
+ static constexpr bool kEnableOnStackReplacement = true;
  
  // JIT compiler
- JitCompilerInterface* Jit::jit_compiler_ = nullptr;
+@@ -352,7 +362,10 @@ extern "C" void art_quick_osr_stub(void** stack,
+                                    const char* shorty,
+                                    Thread* self);
+ 
+-OsrData* Jit::PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs) {
++OsrData* Jit::PrepareForOsr(ArtMethod* method,
++                            uint32_t dex_pc,
++                            uint32_t* vregs,
++                            ShadowFrame* shadow_frame) {
+   if (!kEnableOnStackReplacement) {
+     return nullptr;
+   }
+@@ -394,6 +407,17 @@ OsrData* Jit::PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs)
+     DexRegisterMap vreg_map = code_info.GetDexRegisterMapOf(stack_map);
+     DCHECK_EQ(vreg_map.size(), number_of_vregs);
+ 
++    // art-host fork (large heap): an object reference is a native pointer-width (8-byte) value,
++    // so it may have non-zero high bits when the heap maps above 4 GiB. The OSR stack mask is the
++    // authoritative source for which compiled-frame slots the compiled code and the GC treat as
++    // references at this PC. For a reference slot we must copy the full 8-byte reference from the
++    // interpreter's References() side-array (via shadow_frame->GetVRegReference), not the truncated
++    // low-32-bit value-slot summary in `vregs`. Mirrors the GC root walk in
++    // Thread::ReferenceMapVisitor (thread.cc) and the deopt vreg transfer in
++    // quick_exception_handler.cc, which read stack-mask references as 8-byte StackReferences at
++    // byte offset bit*kVRegSize.
++    BitMemoryRegion stack_mask = code_info.GetStackMaskOf(stack_map);
++
+     size_t frame_size = osr_method->GetFrameSizeInBytes();
+ 
+     // Allocate memory to put shadow frame values. The osr stub will copy that memory to
+@@ -428,11 +452,37 @@ OsrData* Jit::PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs)
+ 
+         DCHECK_EQ(location, DexRegisterLocation::Kind::kInStack);
+ 
+-        int32_t vreg_value = vregs[vreg];
+         int32_t slot_offset = vreg_map[vreg].GetStackOffsetInBytes();
+         DCHECK_LT(slot_offset, static_cast<int32_t>(frame_size));
+         DCHECK_GT(slot_offset, 0);
+-        (reinterpret_cast<int32_t*>(osr_data->memory))[slot_offset / sizeof(int32_t)] = vreg_value;
++
++        // The stack mask marks a reference at bit slot_offset/kVRegSize (it indexes 4-byte slots),
++        // but the reference stored there is a full pointer-width (8-byte) StackReference. The
++        // compiler reserves two kVRegSize slots per reference (NumberOfSpillSlotsNeeded == 2 in
++        // this fork), so slot_offset..slot_offset+8 is the reference's own space and the 8-byte
++        // write cannot collide with an adjacent vreg.
++        const size_t bit = static_cast<size_t>(slot_offset) / kVRegSize;
++        if (shadow_frame != nullptr &&
++            bit < stack_mask.size_in_bits() &&
++            stack_mask.LoadBit(bit)) {
++          // Reference slot: copy the full 8-byte reference from the interpreter shadow frame. The
++          // buffer is memset to 0, so a null reference is already correct, but we write it anyway
++          // to be explicit. kPoisonReferences is off in this fork, so a StackReference is the raw
++          // 8-byte pointer.
++          //
++          // shadow_frame is null only on the nterp OSR path (NterpHotMethod). nterp is disabled in
++          // this fork (IsNterpSupported() == false) because its arm64 asm truncates references to
++          // 4 bytes, so that path is dead code; if it were ever re-enabled we would keep the
++          // legacy 4-byte transfer below (consistent with nterp's own 4-byte reference storage)
++          // until nterp itself is ported to native-width references.
++          mirror::Object* ref = shadow_frame->GetVRegReference(vreg);
++          reinterpret_cast<StackReference<mirror::Object>*>(
++              reinterpret_cast<uint8_t*>(osr_data->memory) + slot_offset)->Assign(ref);
++        } else {
++          // Primitive slot: keep the 4-byte value-slot copy.
++          int32_t vreg_value = vregs[vreg];
++          (reinterpret_cast<int32_t*>(osr_data->memory))[slot_offset / sizeof(int32_t)] = vreg_value;
++        }
+       }
+     }
+ 
+@@ -482,7 +532,8 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
+   ShadowFrame* shadow_frame = thread->GetManagedStack()->GetTopShadowFrame();
+   OsrData* osr_data = jit->PrepareForOsr(method,
+                                          dex_pc + dex_pc_offset,
+-                                         shadow_frame->GetVRegArgs(0));
++                                         shadow_frame->GetVRegArgs(0),
++                                         shadow_frame);
+ 
+   if (osr_data == nullptr) {
+     return false;
+diff --git a/runtime/jit/jit.h b/runtime/jit/jit.h
+index 5e1429eb41..ee81dcfdb1 100644
+--- a/runtime/jit/jit.h
++++ b/runtime/jit/jit.h
+@@ -42,6 +42,7 @@ class ClassLinker;
+ class DexFile;
+ class OatDexFile;
+ class RootVisitor;
++class ShadowFrame;
+ struct RuntimeArgumentMap;
+ union JValue;
+ 
+@@ -302,7 +303,10 @@ class Jit {
+ 
+   // Return the information required to do an OSR jump. Return null if the OSR
+   // cannot be done.
+-  OsrData* PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs)
++  OsrData* PrepareForOsr(ArtMethod* method,
++                         uint32_t dex_pc,
++                         uint32_t* vregs,
++                         ShadowFrame* shadow_frame)
+       REQUIRES_SHARED(Locks::mutator_lock_);
+ 
+   // If an OSR compiled version is available for `method`,
 diff --git a/runtime/jit/jit_memory_region.cc b/runtime/jit/jit_memory_region.cc
 index e3a97efac0..c08739f30e 100644
 --- a/runtime/jit/jit_memory_region.cc

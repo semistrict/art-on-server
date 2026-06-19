@@ -40,4 +40,13 @@ for projdir in "$REPO"/patches/*/; do
     fi
   done
 done
+
+# The static dalvikvm module lists art/dalvikvm/static_jni_symbols.cpp as a
+# source; it is generated (not vendored), and the rsync --delete above removes
+# any stale copy. Regenerate it now -- a stub if the static archives aren't built
+# yet -- so Soong analysis sees the file on the very first `m` (otherwise the
+# dalvikvms module is cached as missing-deps and 57-build-static fails). The
+# two-pass in 57-build-static later refreshes it with the real symbol table.
+bash "$(dirname "$0")/56-gen-static-jni-symbols.sh"
+
 echo "35-stage-sources: OK"

@@ -39,5 +39,10 @@ if ! lunch "$PRODUCT"; then
 fi
 set -u
 
-m nothing
+# --soong-only: skip the Kati/make pass. The rust prebuilt's rlib variants
+# collide in Kati's make-module export ("libstd already defined by
+# prebuilts/rust"); upstream builds musl targets soong-only for the same
+# reason, and so does 50-build-art.sh. Bootstrap only needs to prove the arm64
+# host toolchain + Soong analysis come up, which --soong-only exercises.
+m --soong-only nothing
 echo "40-bootstrap: OK"
